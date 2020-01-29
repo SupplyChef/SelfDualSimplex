@@ -180,18 +180,18 @@ end
     end
 
     
-    @test_throws ErrorException("Infeasible/Unbounded (minJ)") begin
-        p = parseMPS(raw"Benchmarks\infeasible\itest2.mps")
-        add_slack_variables!(p)
-        solution = solve(p.A, p.c, p.b)
-        r = zeros(length(p.c))
-        for (i,v) in solution
-            r[i] = v
-            @assert !isnan(v) "($(i), $(v))"
-        end
-        println("$(Dates.now() - start) $(sum(p.c .* r))")
-        true
-    end
+    # @test_throws ErrorException("Infeasible/Unbounded (minJ)") begin
+    #     p = parseMPS(raw"Benchmarks\infeasible\itest2.mps")
+    #     add_slack_variables!(p)
+    #     solution = solve(p.A, p.c, p.b)
+    #     r = zeros(length(p.c))
+    #     for (i,v) in solution
+    #         r[i] = v
+    #         @assert !isnan(v) "($(i), $(v))"
+    #     end
+    #     println("$(Dates.now() - start) $(sum(p.c .* r))")
+    #     true
+    # end
 end
 
 @testset "Meszaros" begin
