@@ -26,7 +26,7 @@ end
 
 function run_m(name::String, value)
     print("$name ")
-    p = parseMPS("Benchmarks\\meszaros\\$(name).mps")
+    p = parseMPS("test\\Benchmarks\\meszaros\\$(name).mps")
     return run(p, value)    
 end
 
