@@ -181,7 +181,7 @@ end
 
     
     @test_throws ErrorException("Infeasible/Unbounded (minJ)") begin
-        p = parseMPS(raw"..\Benchmarks\itest2.mps")
+        p = parseMPS(raw"..\Benchmarks\infeasible\itest2.mps")
         add_slack_variables!(p)
         solution = solve(p.A, p.c, p.b)
         r = zeros(length(p.c))
