@@ -26,6 +26,7 @@ end
 
 function run_m(name::String, value)
     print("$name ")
+    println(pwd())
     p = parseMPS("test\\Benchmarks\\meszaros\\$(name).mps")
     return run(p, value)    
 end
