@@ -26,14 +26,13 @@ end
 
 function run_m(name::String, value)
     print("$name ")
-    println(pwd())
-    p = parseMPS("test\\Benchmarks\\meszaros\\$(name).mps")
+    p = parseMPS("../benchmarks/meszaros/$(name).mps")
     return run(p, value)    
 end
 
 function run_lp(name::String, value)
     print("$name ")
-    p = parseMPS("Benchmarks\\lptestset\\$(name).mps")
+    p = parseMPS("../benchmarks/lptestset/$(name).mps")
     return run(p, value)
 end
 
