@@ -64,16 +64,6 @@ function get_nnz(m::SparseVector{Float64, Int64})::Int64
     return length(m.nzind)
 end
 
-function get_nnz(m::SparseMatrixCSC{Float64, Int64}, j::Int64, t::Int64)
-    count = 0
-    for i in m.colptr[j]:(m.colptr[j+1]-1)
-        if m.rowval[i] > t
-            count += 1
-        end
-    end
-    return count
-end
-
 function dot(s::SparseMatrixCSC{Float64, Int64}, j::Int64, x::Array{Float64, 1})    
     total = 0.0
     @inbounds for k in s.colptr[j]:(s.colptr[j+1]-1)
@@ -85,28 +75,27 @@ function dot(s::SparseMatrixCSC{Float64, Int64}, j::Int64, x::Array{Float64, 1})
     return total
 end
 
-function dot(s::SparseVector{Float64, Int64}, x::Array{Float64, 1})::Float64
+@inline function dot(s::SparseVector{Float64, Int64}, x::Array{Float64, 1})::Float64
     total = 0.0
     @inbounds for i in 1:length(s.nzind)
-        total += s.nzval[i] * x[s.nzind[i]]
+        xv = x[s.nzind[i]]
+        if xv != 0.0
+            total += s.nzval[i] * xv
+        end
     end
     return total
 end
 
-function ftran!(e::ETAMatrix, x::Array{Float64, 1})
+@inline function ftran!(e::ETAMatrix, x::Array{Float64, 1})
     #eta-ftran (x := E^{−1}x) : xp := xp/ηp and then x := x − xp.η
     if abs(x[e.column_index]) < 1e-12
         #noop
     else
         @inbounds x[e.column_index] /= e.eta_pivot
-        #@assert !isnan(x[e.column_index])
-        #@assert !isinf(x[e.column_index])
-        xp = x[e.column_index]
+        @inbounds xp = x[e.column_index]
         eta = e.eta_other_vector
         @inbounds for i in 1:length(eta.nzind)
             x[eta.nzind[i]] -= xp * eta.nzval[i]
-            #@assert !isnan(x[eta.nzind[i]])
-            #@assert !isinf(x[eta.nzind[i]])
         end
     end
 end
@@ -116,6 +105,4 @@ function btran!(e::ETAMatrix, x::Array{Float64, 1})
     #eta-btran (x := E^{−T}x) : xp := (xp − x'η)/ηp 
     @inbounds x[e.column_index] -= dot(e.eta_other_vector, x) 
     @inbounds x[e.column_index] /= e.eta_pivot
-    #@assert !isnan(x[e.column_index]) "$(e.eta_pivot)"
-    #@assert !isinf(x[e.column_index]) "$(e.eta_pivot)"
 end

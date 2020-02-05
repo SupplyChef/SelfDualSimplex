@@ -2,19 +2,23 @@ using SparseArrays
 using LinearAlgebra
 using Printf
 
-function LUdecomposition(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Array{Int64}}
+include("PFI.jl")
+
+function LUdecomposition(m::SparseMatrixCSC{Float64, Int64}, basis)::PFI
     luf  = lu(m[:,basis])
-    return PFI(ETAMatrix[], luf), basis
+    return PFI(ETAMatrix[], luf, basis)
 end
 
-function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Array{Int64}}
+function LUelimination!(pfi::PFI, m::SparseMatrixCSC{Float64, Int64}, basis::Array{Int64, 1})
     tmp = [get_column(m, b) for b in basis]
     map_to_new_indexes = collect(1:length(basis))
 
     tmp_row_nzs = [Array{Int64,1}() for row in 1:length(basis)]
     for j in 1:length(basis)
-        for i in tmp[j].nzind
-            push!(tmp_row_nzs[i], j)
+        for i in 1:length(tmp[j].nzind)
+            if tmp[j].nzval[i] != 0.0
+                push!(tmp_row_nzs[tmp[j].nzind[i]], j)
+            end
         end
     end
     
@@ -27,6 +31,9 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
     end
 
     row_j = zeros(length(basis))
+
+    Ib = zeros(Int64, length(basis))
+    Vb = zeros(Float64, length(basis))
     @inbounds for j in 1:length(basis)
         # println(j)
         # A = zeros(Float64, (length(tmp),length(tmp)))
@@ -36,6 +43,7 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
         # for v in 1:length(tmp)
         #     println(A[v, :])
         # end
+        # println(tmp_row_nzs)
 
         max_pivot = 0.0
         @inbounds for tmp_j in tmp_row_nzs[j]
@@ -46,14 +54,14 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
             row_j[tmp_j] = r
         end
 
-        if max_pivot == 0
+        if max_pivot == 0.0
             throw(ErrorException("Singular basis"))# $j $basis"))
         end
 
         min_nnz = Inf64
         tmp_k = -1
         @inbounds for tmp_j in tmp_row_nzs[j]
-            if abs(row_j[tmp_j]) >= 0.05 * max_pivot #|| abs(row_j[tmp_j]) >= 0.1
+            if abs(row_j[tmp_j]) >= 0.01 * max_pivot #|| abs(row_j[tmp_j]) >= 0.1
                 if col_nnzs[tmp_j] < min_nnz
                     min_nnz = col_nnzs[tmp_j]
                     tmp_k = tmp_j
@@ -63,7 +71,7 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
         
         map_to_new_indexes[j] = tmp_k
         pivot = row_j[tmp_k]
-        
+                
         lfactors = spzeros(length(basis))
         ufactors = spzeros(length(basis))
         @inbounds for k in 1:length(tmp[tmp_k].nzind)
@@ -78,14 +86,6 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
                 lfactors[i] = v / pivot
             end
         end
-        
-        tmp_k2 = copy(tmp[tmp_k])
-        @inbounds for l in tmp_row_nzs[j]
-            t = row_j[l] / pivot 
-            if t != 0
-                tmp[l] = eliminate2(tmp_k2, tmp[l], j, t, tmp_row_nzs, l)
-            end
-        end
 
         if length(lfactors.nzind) > 0
             push!(ls, ETAMatrix(j, 1.0, lfactors))
@@ -93,6 +93,18 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
         if pivot != 1.0 || length(ufactors.nzind) > 0
             push!(us, ETAMatrix(j, pivot, ufactors))
         end
+                
+        @inbounds for l in tmp_row_nzs[j]
+            if l == tmp_k
+                continue
+            end
+            t = row_j[l] / pivot 
+            if t != 0.0
+                tmp[l] = eliminate2(tmp[tmp_k], tmp[l], j, t, tmp_row_nzs, l)                
+            end
+        end
+        t = row_j[tmp_k] / pivot 
+        tmp[tmp_k] = eliminate2(tmp[tmp_k], tmp[tmp_k], j, t, tmp_row_nzs, tmp_k)
 
         for tmp_j in tmp_row_nzs[j]
             row_j[tmp_j] = 0.0
@@ -101,11 +113,11 @@ function LUelimination(m::SparseMatrixCSC{Float64, Int64}, basis)::Tuple{PFI, Ar
     basis = basis[map_to_new_indexes]
 
     @debug "LU factorization: $(length(ls)) lower Eta matrices, $(length(us)) upper Eta matrices."
-    pfi = PFI(vcat(ls,reverse(us)), nothing)
-    return pfi, basis
+    pfi.eta_matrices = vcat(ls,reverse(us))
+    pfi.basis = basis
 end
 
-function push_if_not_present!(a, new)
+function push_if_not_present!(a::Array{Int64, 1}, new::Int64)
     found = false
     for old in a
         if old == new
@@ -118,77 +130,8 @@ function push_if_not_present!(a, new)
     end
 end
 
-function eliminate(a::SparseVector{Float64, Int64}, b::SparseVector{Float64, Int64}, j::Int64, f::Float64, nzs, l)::SparseVector{Float64, Int64}
-    Ia = a.nzind
-    Va = a.nzval
-    Ib = b.nzind
-    Vb = b.nzval
-    lia = length(Ia)
-    lib = length(Ib)
-    Ic = Array{Int64}(undef, lia + lib)
-    Vc = Array{Float64}(undef, lia + lib)
-    ia = 1
-    ib = 1
-    ic = 1
-    while ia <= lia || ib <= lib
-        if ia > lia
-            # we drain the b vector
-            @inbounds Ic[ic] = Ib[ib]
-            @inbounds Vc[ic] = Vb[ib]
-            ib += 1
-            ic += 1
-            continue
-        end
-        if ib > lib
-            # we drain the a vector
-            if Ia[ia] > j
-                @inbounds Ic[ic] = Ia[ia]
-                @inbounds Vc[ic] = 0 - Va[ia] * f
-                ic += 1
-                push_if_not_present!(nzs[Ia[ia]], l)
-            end
-            ia += 1
-            continue
-        end
-        Iib = Ib[ib]
-        Iia = Ia[ia]
-        if Iia < Iib
-            if Iia > j
-                @inbounds Ic[ic] = Iia
-                @inbounds Vc[ic] = 0 - Va[ia] * f
-                ic += 1
-                push_if_not_present!(nzs[Iia], l)
-            end
-            ia += 1        
-            continue
-        end
-        if Iia == Iib
-            if Iia > j
-                if abs(Vb[ib] - Va[ia] * f) > 1e-15
-                    @inbounds Ic[ic] = Iib
-                    @inbounds Vc[ic] = Vb[ib] - Va[ia] * f
-                    ic += 1
-                end
-            else
-                @inbounds Ic[ic] = Iib
-                @inbounds Vc[ic] = Vb[ib]
-                ic += 1
-            end
-            ia += 1
-            ib += 1
-            continue
-        end
-        if Iia > Iib
-            @inbounds Ic[ic] = Iib
-            @inbounds Vc[ic] = Vb[ib]
-            ib += 1
-            ic += 1
-            continue
-        end
-    end
-    resize!(Ic, ic - 1)
-    resize!(Vc, ic - 1)
-    return SparseVector(length(b), Ic, Vc)
+function remove_if_present!(a, new)
+    filter!(e -> e ≠ new, a)
 end
 
 function eliminate2(a::SparseVector{Float64, Int64}, b::SparseVector{Float64, Int64}, j::Int64, f::Float64, nzs, l)::SparseVector{Float64, Int64}
@@ -199,11 +142,15 @@ function eliminate2(a::SparseVector{Float64, Int64}, b::SparseVector{Float64, In
             old_v = b[i]
             new_v = old_v - f * v
             if abs(new_v) < 1e-15
-                b[i] = 0
+                b[i] = 0.0
+                if old_v != 0.0
+                    remove_if_present!(nzs[i], l)
+                end
             else
                 b[i] = new_v 
-
-                push_if_not_present!(nzs[i], l)
+                if old_v == 0.0
+                    push_if_not_present!(nzs[i], l)
+                end
             end
         end
     end

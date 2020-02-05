@@ -5,12 +5,15 @@ import  Base.size
 import  Base.getindex
 import  Base.setindex
 
-using SparseArrays
-using LinearAlgebra
+using Dates
 using DelimitedFiles
+using LinearAlgebra
+using SparseArrays
+using SuiteSparse
 
 include("MPSParser.jl")
-include("PFI.jl")
+include("LU.jl")
+include("Presolve.jl")
 
 export PFI
 export ETAMatrix
@@ -22,12 +25,11 @@ export parseMPS
 export Problem
 export add_upper_bounds!
 export add_lower_bounds!
-export add_free_variables!
+export handle_negative_lowerbound_variables!
 export add_slack_variables!
 
-export LUelimination
+export LUelimination!
 export LUdecomposition
-export eliminate
 
 function get_column!(c::Array{Float64, 1}, m::SparseMatrixCSC{Float64, Int64}, j::Int64)
     fill!(c, 0.0)
@@ -101,14 +103,17 @@ function computeΔc2!(Δc::Array{Float64}, tA::SparseMatrixCSC{Float64,Int64}, e
     
     for i in 1:length(el)
         if abs(el[i]) > eps
-            (Is, Vs) = get_nz(tA, i)
-            for j in 1:length(Is)
-                Δc[Is[j]] += el[i] * Vs[j]
+            # (Is, Vs) = get_nz(tA, i)
+            # for j in 1:length(Is)
+            #     Δc[Is[j]] += el[i] * Vs[j]
+            # end
+            @inbounds for j in tA.colptr[i]:(tA.colptr[i+1]-1)
+                Δc[tA.rowval[j]] += el[i] * tA.nzval[j]
             end
         end
     end
 
-    for i in 1:length(Δc)
+    for i in (c - b + 1):length(Δc)
         if i > c - b
             Δc[i] = el[i - (c - b)]
         end
@@ -116,194 +121,34 @@ function computeΔc2!(Δc::Array{Float64}, tA::SparseMatrixCSC{Float64,Int64}, e
         #if is_basic[i]
         #     Δc[i] = 0
         # end
-        if abs(Δc[i]) < 1e-12
-            Δc[i] = 0
-        end
+        # if abs(Δc[i]) < 1e-12
+        #     Δc[i] = 0
+        # end
         #end
     end
 end
 
-function add_upper_bounds!(p)
-    @assert length(p.b) == size(p.A)[1] "$(length(p.b)) != $(size(p.A)[1])"
-    @assert length(p.c) == size(p.A)[2]
-
-    lb = length(p.b)
-    lc = length(p.c)
-
-    bound_count = count(p.upper_bounds .< Inf64)
-    
-    resize!(p.b, length(p.b) + bound_count)
-
-    (Is, Js, Vs) = findnz(p.A)
-
-    #p.A = resize(p.A, size(p.A)[1] + bound_count, size(p.A)[2])
-    j = 1
-    for i in 1:length(p.upper_bounds)
-        if p.upper_bounds[i] < Inf64
-            p.b[lb + j] = p.upper_bounds[i]
-            push!(Is, lb + j)
-            push!(Js, i)
-            push!(Vs, 1.0)            
-            #p.A[lb + j, i] = 1.0
-            j += 1
-        end
-    end
-    p.A = sparse(Is, Js, Vs, size(p.A)[1] + bound_count, size(p.A)[2])
-
-    @assert length(p.b) == size(p.A)[1]
-    @assert length(p.c) == size(p.A)[2]
-end
-
-function add_lower_bounds!(p)
-    @assert length(p.b) == size(p.A)[1]
-    @assert length(p.c) == size(p.A)[2]
-
-    lb = length(p.b)
-    lc = length(p.c)    
-
-    bound_count = count(p.lower_bounds .> 0.0)
-    
-    resize!(p.b, length(p.b) + bound_count)
-
-    (Is, Js, Vs) = findnz(p.A)
-    #p.A = resize(p.A, size(p.A)[1] + bound_count, size(p.A)[2])
-    j = 1
-    for i in 1:length(p.lower_bounds)
-        if p.lower_bounds[i] > 0.0
-            p.b[lb + j] = -p.lower_bounds[i]
-            push!(Is, lb + j)
-            push!(Js, i)
-            push!(Vs, -1.0)            
-            #p.A[lb + j, i] = -1.0
-            j += 1
-        end
-    end
-    p.A = sparse(Is, Js, Vs, size(p.A)[1] + bound_count, size(p.A)[2])
-
-    @assert length(p.b) == size(p.A)[1]
-    @assert length(p.c) == size(p.A)[2]
-end
-
-function add_free_variables!(p)
-    @assert length(p.b) == size(p.A)[1]
-    @assert length(p.c) == size(p.A)[2]
-
-    lc = length(p.c)
-
-    bound_count = count((p.lower_bounds .== -Inf64) .& (p.upper_bounds .== Inf64))
-    
-    resize!(p.c, length(p.c) + bound_count)
-    p.A = resize(p.A, size(p.A)[1], size(p.A)[2] + bound_count)
-    j = 1
-    for i in 1:length(p.lower_bounds)
-        if p.lower_bounds[i] == -Inf64 && p.upper_bounds[i] == Inf64
-            p.A[:, lc + j] = -p.A[:, i]
-            p.c[lc + j] = -p.c[i]
-            j += 1
-        end
-    end
-
-    @assert length(p.b) == size(p.A)[1]
-    @assert length(p.c) == size(p.A)[2]
-end
-
-function add_slack_variables!(p)
-    @assert length(p.b) == size(p.A)[1]
-    @assert length(p.c) == size(p.A)[2]
-
-    lb = length(p.b)
-    lc = length(p.c)
-
-    resize!(p.c, length(p.c) + lb)
-    #p.A = resize(p.A, size(p.A)[1], size(p.A)[2] + lb)
-    (Is, Js, Vs) = findnz(p.A)
-    for i in 1:lb
-        p.c[lc + i] = 0.0
-        push!(Is, i)
-        push!(Js, lc + i)
-        push!(Vs, 1.0)
-        #p.A[i, lc + i] = 1.0
-    end
-    p.A = sparse(Is, Js, Vs, size(p.A)[1], size(p.A)[2] + lb)
-end
-
-function resize(a::SparseMatrixCSC{Float64, Int64}, m, n)
-    (I, J, V) = findnz(a)
-    return sparse(I, J, V, m, n)
-end
-
-function presolve!(p, presolution::Dict{String, Float64})
-    # p.A * x <= p.b
-    active = repeat([true], length(p.lower_bounds))
-    for i in 1:length(p.lower_bounds)
-        if p.lower_bounds[i] == p.upper_bounds[i]
-            active[i] = false            
-            if p.lower_bounds[i] != 0.0
-                (Is, Vs) = get_nz(p.A, i)
-                for k in 1:length(Is)
-                    #println("p.b[$(Is[k])] $(p.b[Is[k]]) => $(p.b[Is[k]] - p.lower_bounds[i] * Vs[k])")
-                    p.b[Is[k]] -= p.lower_bounds[i] * Vs[k]
-                end
-            end
-            push!(presolution, p.c_names[i] => p.lower_bounds[i])
-        end
-    end
-
-    p.A = p.A[:,active]
-    p.c = p.c[active]
-    p.upper_bounds = p.upper_bounds[active]
-    p.lower_bounds = p.lower_bounds[active]
-    p.c_names = p.c_names[active]
-
-    active = repeat([true], length(p.b))
-    (Is, Js, Vs) = findnz(p.A)
-    tA = sparse(Js, Is, Vs, size(p.A)[2], size(p.A)[1])
-    row_scaling = repeat([1.0], size(p.A)[1])
-    for i in 1:size(tA)[2]
-        (Is, Vs) = get_nz(tA, i)
-        if length(Vs) > 0
-            maxV = maximum(sqrt.(abs.(Vs)))
-            if maxV > 1.0
-                row_scaling[i] = 1.0 / maxV
-            end
-        else
-            if p.b[i] < 0.0
-                throw(ErrorException("Infeasible: $i $(p.b[i])"))
-            end
-            active[i] = false
-        end
-    end
-    tA = tA[:,active]
-    p.b = p.b[active]
-    row_scaling = row_scaling[active]
-
-    (Is, Js, Vs) = findnz(tA)
-    p.A = sparse(Js, Is, Vs, size(tA)[2], size(tA)[1])
-    
-    d = Diagonal(row_scaling)
-    p.A = d * p.A
-    p.b = d * p.b
-end
-
-function solve(p)
+function solve(p; time_limit=-1)
     p = deepcopy(p)
     print("$(size(p.A)) ")
     presolution = Dict{String, Float64}()
     presolve!(p, presolution)
     print("$(size(p.A)) ")
+    handle_negative_lowerbound_variables!(p)
     add_upper_bounds!(p)
     add_lower_bounds!(p)
-    add_free_variables!(p)
+    #add_free_variables!(p)    
     add_slack_variables!(p)
     print("$(size(p.A)) ")
-    solution = solve(p.A, p.c, p.b)
+    solution = solve(p.A, p.c, p.b; time_limit=time_limit)
     solution2 = Dict{String, Float64}(p.c_names[i] => get(solution, i, 0.0) for i in 1:length(p.c_names))
     merge!(solution2, presolution)
     return solution2
 end
 
-function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{Float64,1})
-    
+function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{Float64,1}; time_limit=-1)
+    SuiteSparse.UMFPACK.umf_ctrl[8] = 0
+
     @assert size(A)[1] == length(b) "Size of b and size of A do not match: $(size(A)[1]) != $(length(b))"
     @assert size(A)[2] == length(c) "Size of c and size of A do not match: $(size(A)[2]) != $(length(c))"
     @assert count(x -> isnan(x), b) == 0
@@ -320,10 +165,14 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     for b in basis
         is_basic[b] = true
     end
-    pfi, basis = LUelimination(A, basis)
+    pfi = PFI()
+    #LUelimination!(pfi, A, basis)
+    pfi = LUdecomposition(A, basis)
+    basis = pfi.basis
+
  
     b_hat = copy(b) # values of basic variables
-    c_hat = copy(c) # costs 
+    c_hat = copy(c) # values of dual variables
 
     perturbation_c = vcat(repeat([1.0], length(c)-length(b)) .+ 5 .* rand(Float64, length(c)-length(b)), repeat([0.0], length(b)))
     perturbation_c_hat = copy(perturbation_c)
@@ -338,7 +187,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     el = zeros(length(b))
     Δb = zeros(length(b))
     Δc = zeros(length(c))
-    Δz = zeros(length(c))
 
     pb = zeros(length(b))
     pc = zeros(length(c))
@@ -346,24 +194,27 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     forced_refactoring = false
     primal_count = 0
     dual_count = 0
-    while(true)
+    start = Dates.now()
+    while(time_limit < 0 || (Dates.now() - start < Second(time_limit)))
         #@assert sum(is_basic) == length(basis)
         iter = iter + 1
 
         fill!(pb, 0.0)
         @inbounds for i in 1:length(b_hat)
-            if b_hat[i] < 0
+            if b_hat[i] < 0.0
                 violation = -b_hat[i]
                 pb[i] = violation / perturbation_b_hat[i]
             end
         end
         fill!(pc, 0.0)
         @inbounds for i in 1:length(c_hat)
-            if !is_basic[i] && c_hat[i] < 0 
-                violation = -c_hat[i]
+            c_hat_i = c_hat[i]
+            if c_hat_i < 0.0 && !is_basic[i] 
+                violation = -c_hat_i 
                 pc[i] = violation / perturbation_c_hat[i]
             end
         end
+
         (t_b, leaving) = max_argmax(pb)
         (t_c, j) = max_argmax(pc)
         t = max(t_b, t_c)
@@ -371,10 +222,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         #@assert t <= old_t "$t $old_t"
         old_t = t
 
-        # println("b_hat:$b_hat") 
-        # println("c_hat:$c_hat")
-        # println("perturbation_b_hat:$perturbation_b_hat") 
-        # println("perturbation_c_hat:$perturbation_c_hat") 
         if iter % 15000 == 0
             r = zeros(length(c))
             for (i,v) in Dict(zip(basis, b_hat))
@@ -401,13 +248,12 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             # for i in 1:length(Δc)
             #     @assert Δc[i] ≈ Δc2[i] "$(Δc[i]) ≈ $(Δc2[i])"
             # end
-            Δz = -Δc
                 
             fill!(pc, Inf64)
             @inbounds for i in 1:length(c_hat)
-                if !is_basic[i] && Δz[i] > eps  #c will decrease; it should not go negative for variables that are not at their upper bound (or we loose optimality)
-                    @assert (c_hat[i] + t * perturbation_c_hat[i]) > 0 "iter: $iter c_hat: $(c_hat[i]) perturbation_c_hat: $(perturbation_c_hat[i]) t: $t bn_hat: $(bn_hat[i]) upper: $(upper_bounds[i]) $(c_hat[i] + t * perturbation_c_hat[i]) > 0"
-                    pc[i] = (c_hat[i] + t * perturbation_c_hat[i]) / Δz[i]
+                if !is_basic[i] && Δc[i] < -eps  #c will decrease; it should not go negative for variables that are not at their upper bound (or we loose optimality)
+                    #@assert (c_hat[i] + t * perturbation_c_hat[i]) > 0 "iter: $iter c_hat: $(c_hat[i]) perturbation_c_hat: $(perturbation_c_hat[i]) t: $t $(c_hat[i] + t * perturbation_c_hat[i]) > 0"
+                    pc[i] = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
                 end
             end
             (minJ, j) = min_argmin(pc)
@@ -441,7 +287,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
             #computeΔc!(Δc, A, el, pfi, is_basic, leaving)
             computeΔc2!(Δc, tA, el, pfi, is_basic, leaving, eps)
-            Δz = -Δc
         end
         catch
             #forced_refactoring = true
@@ -450,7 +295,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
         @debug "$iter t_b: $t_b t_c: $t_c entering:$j leaving:$(basis[leaving]) b_hat: $(b_hat[leaving]) perturbation_b_hat: $(perturbation_b_hat[leaving]) Δb: $(Δb[leaving]) c_hat: $(c_hat[j]) perturbation_c_hat: $(perturbation_c_hat[j]) Δc: $(Δc[j])"
 
-        if Δb[leaving] == 0
+        if Δb[leaving] == 0 || Δc[j] == 0
+            println("$iter Changing perturbation")
             perturbation_c = vcat(repeat([1.0], length(c)-length(b)) .+ 5 .* rand(Float64, length(c)-length(b)), repeat([0.0], length(b))) / 100.0
             perturbation_c_hat = copy(perturbation_c)
             perturbation_b = repeat([1.0], length(b)) .+ 5 .* rand(Float64, length(b))
@@ -478,39 +324,26 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             η = ETAMatrix(leaving, sΔb)
             push!(pfi.eta_matrices, η)
             
-            t = b_hat[leaving] / Δb[leaving]
-            @assert !isnan(t) & !isinf(t) "t_b: $t_b t_c: $t_c b_hat: $(b_hat[leaving]) perturbation_b_hat: $(perturbation_b_hat[leaving]) Δb: $(Δb[leaving]) c_hat: $(c_hat[j]) perturbation_c_hat: $(perturbation_c_hat[j]) Δc: $(Δc[j]) leaving: $(basis[leaving]) entering: $j"
-            perturbation_t = perturbation_b_hat[leaving] / Δb[leaving]
-            @assert !isnan(perturbation_t) & !isinf(perturbation_t) "perturbation_b_hat: $(perturbation_b_hat[leaving]) Δb: $(Δb[leaving])"
-
-            axpy!(-t, Δb, b_hat)
-            axpy!(-perturbation_t, Δb, perturbation_b_hat)
-            b_hat[leaving] = t
-            perturbation_b_hat[leaving] = perturbation_t 
-                    
-            s = c_hat[j] / Δc[j]
-            @assert !isnan(s) & !isinf(s) "c_hat: $(c_hat[j]) Δc: $(Δc[j]) b_hat: $(b_hat[leaving]) Δb: $(Δb[leaving]) leaving: $(basis[leaving]) entering: $j"
-            perturbation_s = perturbation_c_hat[j] / Δc[j]
-            @assert !isnan(perturbation_s) & !isinf(perturbation_s) "perturbation_c_hat: $(perturbation_c_hat[j]) Δc: $(Δc[j])"
-            axpy!(-s, Δc, c_hat)
-            axpy!(-perturbation_s, Δc, perturbation_c_hat)
-            c_hat[basis[leaving]] = -s
-            perturbation_c_hat[basis[leaving]] = -perturbation_s            
-
+            updateBasicVariables(b_hat, Δb, leaving)
+            updateBasicVariables(perturbation_b_hat, Δb, leaving)
+            
+            updateDualVariables(c_hat, Δc, j, leaving, basis)
+            updateDualVariables(perturbation_c_hat, Δc, j, leaving, basis)
+            
             # @inbounds for i in 1:length(b_hat)
-            #     if abs(b_hat[i]) < eps
+            #     if b_hat[i] < 0
             #         b_hat[i] = 0
             #     end
-            #     if abs(perturbation_b_hat[i]) < eps
+            #     if perturbation_b_hat[i] < 0
             #         perturbation_b_hat[i] = 0
             #     end
             # end
 
             # @inbounds for i in 1:length(c_hat)
-            #     if abs(c_hat[i]) < eps
+            #     if c_hat[i] < 0
             #         c_hat[i] = 0
             #     end
-            #     if abs(perturbation_c_hat[i]) < eps
+            #     if perturbation_c_hat[i] < 0
             #         perturbation_c_hat[i] = 0
             #     end
             # end
@@ -529,7 +362,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         if iter % 70 == 0 || forced_refactoring
             forced_refactoring = false
 
-            pfi, basis = LUelimination(A, basis)
+            #LUelimination!(pfi, A, basis)
+            pfi = LUdecomposition(A, basis)
+            basis = pfi.basis
             
             b_hat = copy(b)
             ftran!(pfi, b_hat)
@@ -557,6 +392,20 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
         end
     end
+end
+
+function updateBasicVariables(b_hat, Δb, leaving)
+    @inbounds t = b_hat[leaving] / Δb[leaving]
+    #@assert !isnan(t) & !isinf(t) "t_b: $t_b t_c: $t_c b_hat: $(b_hat[leaving]) perturbation_b_hat: $(perturbation_b_hat[leaving]) Δb: $(Δb[leaving]) c_hat: $(c_hat[j]) perturbation_c_hat: $(perturbation_c_hat[j]) Δc: $(Δc[j]) leaving: $(basis[leaving]) entering: $j"
+    axpy!(-t, Δb, b_hat)
+    @inbounds b_hat[leaving] = t
+end
+
+function updateDualVariables(c_hat, Δc, j, leaving, basis)
+    @inbounds s = c_hat[j] / Δc[j]
+    #@assert !isnan(s) & !isinf(s) "t_b:$t_b t_c:$t_c c_hat: $(c_hat[j]) Δc: $(Δc[j]) b_hat: $(b_hat[leaving]) Δb: $(Δb[leaving]) leaving: $(basis[leaving]) entering: $j"
+    axpy!(-s, Δc, c_hat)
+    @inbounds c_hat[basis[leaving]] = -s
 end
 
 end # module

@@ -138,7 +138,7 @@ function create_lower_bounds(columns, bounds)::Array{Float64}
         if type == "LO" || type == "FX"
             lower_bounds[columns[column_name]] = value
         end
-        if type == "FR"
+        if type == "FR" || type == "MI"
             lower_bounds[columns[column_name]] = -Inf64
         end
     end
@@ -160,6 +160,9 @@ function create_upper_bounds(columns, bounds)::Array{Float64}
         if type == "FR"
             upper_bounds[columns[column_name]] = Inf64
         end
+        if type == "MI"
+            upper_bounds[columns[column_name]] = 0.0
+        end
     end
     return upper_bounds
 end
@@ -173,6 +176,7 @@ function parseMPS(file_name)
     bounds = Dict{String, Array{Tuple{String, String, Float64}, 1}}() # name => [(column_name, type, value)]
 
     firstNrow = true
+    excludeNRows = Set{String}()
     row_index = 1
     open(file_name) do f
         section = :NAME
@@ -210,17 +214,26 @@ function parseMPS(file_name)
                 continue
             end
             
+            if section == :RANGES
+                throw(ErrorException("RANGES not supported"))
+            end
+            
             if section == :ROWS
                 type = String(strip(line[2:3]))
                 row_name = String(strip(line[4:end]))
-                if type == "N" && firstNrow
-                    push!(rows, row_name => (0, type))
-                    firstNrow = false
+                if type == "N" 
+                    if firstNrow
+                        push!(rows, row_name => (0, type))
+                        firstNrow = false
+                    else
+                        push!(excludeNRows, row_name)
+                    end
                 else
                     push!(rows, row_name => (row_index, type))
                     if type == "G" || type == "L"
                         row_index = row_index + 1
                     else 
+                        @assert type == "E" "$type == E"
                         row_index = row_index + 2
                     end
                 end
@@ -230,18 +243,23 @@ function parseMPS(file_name)
                 try
                     #5-12      15-22     25-36     40-47     50-61
                     column_name = String(strip(line[5:12]))
-                    row_name = String(strip(line[15:22]))
                     if !haskey(columns, column_name)
                         push!(columns, column_name => length(columns)+1)
                     end
-                    value = parse(Float64, String(strip(line[25:min(36,length(line))])))
-                    push!(vs, (column_name, row_name, value))
+    
+                    row_name = String(strip(line[15:22]))
+                    if !(row_name in excludeNRows)
+                        value = parse(Float64, String(strip(line[25:min(36,length(line))])))
+                        push!(vs, (column_name, row_name, value))
+                    end
 
                     if length(line) > 40
                         row_name2 = String(strip(line[40:47]))
-                        if !isempty(row_name2)
-                            value2 = parse(Float64, String(strip(line[50:end])))
-                            push!(vs, (column_name, row_name2, value2))
+                        if !(row_name2 in excludeNRows)
+                            if !isempty(row_name2)
+                                value2 = parse(Float64, String(strip(line[50:end])))
+                                push!(vs, (column_name, row_name2, value2))
+                            end
                         end
                     end
                     continue
@@ -253,17 +271,21 @@ function parseMPS(file_name)
             if section == :RHS
                 rhs_name = String(strip(line[5:12]))
                 row_name = String(strip(line[15:22]))
-                if !haskey(rhs, rhs_name)
-                    push!(rhs, rhs_name => Dict{String, Float64}())
+                if !(row_name in excludeNRows)
+                    if !haskey(rhs, rhs_name)
+                        push!(rhs, rhs_name => Dict{String, Float64}())
+                    end
+                    value = parse(Float64, String(strip(line[25:min(36,length(line))])))
+                    push!(rhs[rhs_name], row_name => value)
                 end
-                value = parse(Float64, String(strip(line[25:min(36,length(line))])))
-                push!(rhs[rhs_name], row_name => value)
 
                 if length(line) > 40
                     row_name2 = String(strip(line[40:47]))
-                    if !isempty(row_name2)
-                        value2 = parse(Float64, String(strip(line[50:end])))
-                        push!(rhs[rhs_name], row_name2 => value2)
+                    if !(row_name2 in excludeNRows)
+                        if !isempty(row_name2)
+                            value2 = parse(Float64, String(strip(line[50:end])))
+                            push!(rhs[rhs_name], row_name2 => value2)
+                        end
                     end
                 end
                 continue
@@ -275,13 +297,13 @@ function parseMPS(file_name)
                     column = String(strip(line[15:min(22,length(line))]))
                     if type == "PL"
                         continue    
-                    elseif type == "FR"
+                    elseif type in ["FR", "MI"]
                         value = 0.0
                     elseif type in ["UP","LO", "FX"]
                         value = parse(Float64, String(strip(line[25:min(36,length(line))])))
-                        if type == "LO" && value < 0
-                            throw(ErrorException("Does not support negative lower bounds: $line"))
-                        end
+                        # if type == "LO" && value < 0
+                        #     throw(ErrorException("Does not support negative lower bounds: $line"))
+                        # end
                     else
                         throw(ErrorException("Cannot process bound: $line"))
                     end
