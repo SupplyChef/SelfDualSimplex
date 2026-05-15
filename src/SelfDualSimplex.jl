@@ -158,7 +158,7 @@ function solve(p; time_limit=-1)
 end
 
 function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{Float64,1}; time_limit=-1)
-    SuiteSparse.UMFPACK.umf_ctrl[8] = 0
+    try; SuiteSparse.UMFPACK.umf_ctrl[8] = 0; catch; end  # silence UMFPACK output; field removed in Julia 1.11+
 
     @assert size(A)[1] == length(b) "Size of b and size of A do not match: $(size(A)[1]) != $(length(b))"
     @assert size(A)[2] == length(c) "Size of c and size of A do not match: $(size(A)[2]) != $(length(c))"
