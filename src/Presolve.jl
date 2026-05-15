@@ -187,8 +187,24 @@ function presolve!(p, presolution::Dict{String, Float64})
 
     (Is, Js, Vs) = findnz(tA)
     p.A = sparse(Js, Is, Vs, size(tA)[2], size(tA)[1])
-    
+
     d = Diagonal(row_scaling)
     p.A = d * p.A
     p.b = d * p.b
+
+    col_scaling = ones(Float64, size(p.A, 2))
+    for j in 1:size(p.A, 2)
+        col_range = p.A.colptr[j]:(p.A.colptr[j+1]-1)
+        isempty(col_range) && continue
+        max_val = maximum(abs, view(p.A.nzval, col_range))
+        if max_val > 0.0
+            s = 1.0 / max_val
+            p.A.nzval[col_range] .*= s
+            p.c[j] *= s
+            p.lower_bounds[j] /= s
+            p.upper_bounds[j] /= s
+            col_scaling[j] = s
+        end
+    end
+    return col_scaling
 end
