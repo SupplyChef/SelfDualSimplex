@@ -63,14 +63,17 @@ function add_lower_bounds!(p)
     @assert length(p.c) == size(p.A)[2]
 end
 
-"Splits variables into a variable for the positive part and a variable for the negative part"
+"Splits variables into a variable for the positive part and a variable for the negative part.
+Returns (flipped, split_pairs) where flipped is the set of indices negated by Case 1, and
+split_pairs maps each Case 2 index to the index of its newly created negative-part variable."
 function handle_negative_lowerbound_variables!(p)
     @assert length(p.b) == size(p.A)[1]
     @assert length(p.c) == size(p.A)[2]
 
     lc = length(p.c)
 
-    for i in 1:length(p.lower_bounds)
+    flipped = Set{Int}()
+    for i in 1:lc
         if p.lower_bounds[i] < 0 && p.upper_bounds[i] <= 0
             p.c[i] = -p.c[i]
             (Is, Vs) = get_nz(p.A, i)
@@ -80,32 +83,34 @@ function handle_negative_lowerbound_variables!(p)
             l = p.lower_bounds[i]
             p.lower_bounds[i] = -p.upper_bounds[i]
             p.upper_bounds[i] = -l
+            push!(flipped, i)
         end
     end
 
     bound_count = count((p.lower_bounds .< 0) .& (p.upper_bounds .> 0))
-    
+
     resize!(p.c, length(p.c) + bound_count)
     resize!(p.lower_bounds, length(p.lower_bounds) + bound_count)
     resize!(p.upper_bounds, length(p.upper_bounds) + bound_count)
     (Is, Js, Vs) = findnz(p.A)
     (m, n) = size(p.A)
-    #p.A = resize(p.A, size(p.A)[1], size(p.A)[2] + bound_count)
+
+    split_pairs = Dict{Int, Int}()
     j = 1
-    for i in 1:length(p.lower_bounds)
+    for i in 1:lc
         if p.lower_bounds[i] < 0 && p.upper_bounds[i] > 0
-            #p.A[:, lc + j] = -p.A[:, i]
             new_column = -p.A[:, i]
             append!(Is, new_column.nzind)
             append!(Js, repeat([n + j], length(new_column.nzind)))
             append!(Vs, new_column.nzval)
-    
+
             p.c[lc + j] = -p.c[i]
             p.lower_bounds[lc + j] = 0.0
             p.upper_bounds[lc + j] = -p.lower_bounds[i]
 
             p.lower_bounds[i] = 0.0
-            
+
+            split_pairs[i] = lc + j
             j += 1
         end
     end
@@ -113,6 +118,8 @@ function handle_negative_lowerbound_variables!(p)
     p.A = sparse(Is, Js, Vs, m, n + bound_count)
     @assert length(p.b) == size(p.A)[1]
     @assert length(p.c) == size(p.A)[2]
+
+    return (flipped, split_pairs)
 end
 
 function add_slack_variables!(p)
@@ -170,7 +177,7 @@ function presolve!(p, presolution::Dict{String, Float64})
     for i in 1:size(tA)[2]
         (Is, Vs) = get_nz(tA, i)
         if length(Vs) > 0
-            maxV = maximum(sqrt.(abs.(Vs)))
+            maxV = maximum(abs.(Vs))
             if maxV > 1.0
                 row_scaling[i] = 1.0 / maxV
             end
@@ -187,8 +194,24 @@ function presolve!(p, presolution::Dict{String, Float64})
 
     (Is, Js, Vs) = findnz(tA)
     p.A = sparse(Js, Is, Vs, size(tA)[2], size(tA)[1])
-    
+
     d = Diagonal(row_scaling)
     p.A = d * p.A
     p.b = d * p.b
+
+    col_scaling = ones(Float64, size(p.A, 2))
+    for j in 1:size(p.A, 2)
+        col_range = p.A.colptr[j]:(p.A.colptr[j+1]-1)
+        isempty(col_range) && continue
+        max_val = maximum(abs, view(p.A.nzval, col_range))
+        if max_val > 0.0
+            s = 1.0 / max_val
+            p.A.nzval[col_range] .*= s
+            p.c[j] *= s
+            p.lower_bounds[j] /= s
+            p.upper_bounds[j] /= s
+            col_scaling[j] = s
+        end
+    end
+    return col_scaling
 end

@@ -132,16 +132,27 @@ function solve(p; time_limit=-1)
     p = deepcopy(p)
     print("$(size(p.A)) ")
     presolution = Dict{String, Float64}()
-    presolve!(p, presolution)
+    col_scaling = presolve!(p, presolution)
     print("$(size(p.A)) ")
-    handle_negative_lowerbound_variables!(p)
+    (flipped, split_pairs) = handle_negative_lowerbound_variables!(p)
     add_upper_bounds!(p)
     add_lower_bounds!(p)
-    #add_free_variables!(p)    
+    #add_free_variables!(p)
     add_slack_variables!(p)
     print("$(size(p.A)) ")
     solution = solve(p.A, p.c, p.b; time_limit=time_limit)
-    solution2 = Dict{String, Float64}(p.c_names[i] => get(solution, i, 0.0) for i in 1:length(p.c_names))
+    solution2 = Dict{String, Float64}()
+    for i in 1:length(p.c_names)
+        raw = get(solution, i, 0.0)
+        if i in flipped
+            solution2[p.c_names[i]] = -raw * col_scaling[i]
+        elseif haskey(split_pairs, i)
+            raw_neg = get(solution, split_pairs[i], 0.0)
+            solution2[p.c_names[i]] = (raw - raw_neg) * col_scaling[i]
+        else
+            solution2[p.c_names[i]] = raw * col_scaling[i]
+        end
+    end
     merge!(solution2, presolution)
     return solution2
 end
@@ -159,7 +170,15 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
     eps = 1e-8
     t = 0.0
-        
+
+    n_constraints = length(b)
+    refactor_pivot_cap = max(70, n_constraints)
+    refactor_fill_threshold = 3 * n_constraints
+
+    b_scale = max(1.0, norm(b) / sqrt(n_constraints))
+    c_nz = length(c) - n_constraints
+    c_scale = c_nz > 0 ? max(1.0, norm(c[1:c_nz]) / sqrt(c_nz)) : 1.0
+
     basis = collect(length(c) - length(b) + 1:length(c))
     is_basic = zeros(Bool, length(c))
     for b in basis
@@ -174,9 +193,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     b_hat = copy(b) # values of basic variables
     c_hat = copy(c) # values of dual variables
 
-    perturbation_c = vcat(repeat([1.0], length(c)-length(b)) .+ 5 .* rand(Float64, length(c)-length(b)), repeat([0.0], length(b)))
+    perturbation_c = vcat(c_scale .* (repeat([1.0], c_nz) .+ 5 .* rand(Float64, c_nz)), repeat([0.0], n_constraints))
     perturbation_c_hat = copy(perturbation_c)
-    perturbation_b = repeat([1.0], length(b)) .+ 5 .* rand(Float64, length(b))
+    perturbation_b = b_scale .* (repeat([1.0], n_constraints) .+ 5 .* rand(Float64, n_constraints))
     perturbation_b_hat = copy(perturbation_b)
     
     old_t = Inf64
@@ -297,9 +316,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
         if Δb[leaving] == 0 || Δc[j] == 0
             println("$iter Changing perturbation")
-            perturbation_c = vcat(repeat([1.0], length(c)-length(b)) .+ 5 .* rand(Float64, length(c)-length(b)), repeat([0.0], length(b))) / 100.0
+            perturbation_c = vcat((c_scale / 100.0) .* (repeat([1.0], c_nz) .+ 5 .* rand(Float64, c_nz)), repeat([0.0], n_constraints))
             perturbation_c_hat = copy(perturbation_c)
-            perturbation_b = repeat([1.0], length(b)) .+ 5 .* rand(Float64, length(b))
+            perturbation_b = b_scale .* (repeat([1.0], n_constraints) .+ 5 .* rand(Float64, n_constraints))
             perturbation_b_hat = copy(perturbation_b)
             ftran!(pfi, perturbation_b_hat)
         
@@ -359,7 +378,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
         end
 
-        if iter % 70 == 0 || forced_refactoring
+        total_eta_nnz = sum(nnz(η.eta_other_vector) for η in pfi.eta_matrices; init=0)
+        if total_eta_nnz > refactor_fill_threshold || length(pfi.eta_matrices) >= refactor_pivot_cap || forced_refactoring
             forced_refactoring = false
 
             #LUelimination!(pfi, A, basis)
