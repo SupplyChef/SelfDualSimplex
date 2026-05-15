@@ -134,14 +134,25 @@ function solve(p; time_limit=-1)
     presolution = Dict{String, Float64}()
     col_scaling = presolve!(p, presolution)
     print("$(size(p.A)) ")
-    handle_negative_lowerbound_variables!(p)
+    (flipped, split_pairs) = handle_negative_lowerbound_variables!(p)
     add_upper_bounds!(p)
     add_lower_bounds!(p)
-    #add_free_variables!(p)    
+    #add_free_variables!(p)
     add_slack_variables!(p)
     print("$(size(p.A)) ")
     solution = solve(p.A, p.c, p.b; time_limit=time_limit)
-    solution2 = Dict{String, Float64}(p.c_names[i] => get(solution, i, 0.0) * col_scaling[i] for i in 1:length(p.c_names))
+    solution2 = Dict{String, Float64}()
+    for i in 1:length(p.c_names)
+        raw = get(solution, i, 0.0)
+        if i in flipped
+            solution2[p.c_names[i]] = -raw * col_scaling[i]
+        elseif haskey(split_pairs, i)
+            raw_neg = get(solution, split_pairs[i], 0.0)
+            solution2[p.c_names[i]] = (raw - raw_neg) * col_scaling[i]
+        else
+            solution2[p.c_names[i]] = raw * col_scaling[i]
+        end
+    end
     merge!(solution2, presolution)
     return solution2
 end
