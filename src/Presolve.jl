@@ -190,6 +190,7 @@ function presolve!(p, presolution::Dict{String, Float64})
     end
     tA = tA[:,active]
     p.b = p.b[active]
+    p.equality_rows = p.equality_rows[active]
     row_scaling = row_scaling[active]
 
     (Is, Js, Vs) = findnz(tA)
@@ -214,4 +215,35 @@ function presolve!(p, presolution::Dict{String, Float64})
         end
     end
     return col_scaling
+end
+
+# For each equality row i, its slack (at column n_before_slacks+i) must equal zero.
+# Enforce this by adding a trivial row [s_eq ≤ 0] plus its own slack, which is far
+# cheaper than the previous approach of duplicating the full row with negated signs.
+function add_equality_upper_bound_rows!(p, equality_rows, n_before_slacks)
+    eq_indices = findall(equality_rows)
+    isempty(eq_indices) && return
+
+    m   = length(p.b)
+    n   = size(p.A, 2)
+    lc  = length(p.c)
+    k   = length(eq_indices)
+
+    (Is, Js, Vs) = findnz(p.A)
+    resize!(p.b, m + k)
+    resize!(p.c, lc + k)
+
+    for (t, i) in enumerate(eq_indices)
+        new_row       = m + t
+        slack_col     = n_before_slacks + i   # the equality row's slack
+        new_slack_col = lc + t                # slack for this new upper-bound row
+
+        push!(Is, new_row);  push!(Js, slack_col);     push!(Vs,  1.0)
+        push!(Is, new_row);  push!(Js, new_slack_col); push!(Vs,  1.0)
+
+        p.b[new_row]        = 0.0
+        p.c[new_slack_col]  = 0.0
+    end
+
+    p.A = sparse(Is, Js, Vs, m + k, n + k)
 end
