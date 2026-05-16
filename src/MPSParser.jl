@@ -62,7 +62,8 @@ function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
     vs = filter(v -> rows[v[2]][2] != "N", vs)
 
     column_count = maximum(values(columns))
-    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G" || r[2][2] == "E", rows)))
+    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G", rows))) +
+                2 * length(collect(filter(r -> r[2][2] == "E", rows)))
 
     I = Int64[]
     J = Int64[]
@@ -72,7 +73,7 @@ function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
         type = rows[row_name][2]
         row_index = rows[row_name][1]
         column_index = columns[column_name]
-        if type == "L" || type == "E"
+        if type == "L"
             push!(I, row_index)
             push!(J, column_index)
             push!(V, value)
@@ -80,6 +81,9 @@ function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
             push!(I, row_index)
             push!(J, column_index)
             push!(V, -value)
+        elseif type == "E"
+            push!(I, row_index);   push!(J, column_index); push!(V,  value)
+            push!(I, row_index+1); push!(J, column_index); push!(V, -value)
         end
     end
 
@@ -88,7 +92,8 @@ function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
 end
 
 function createB(rows, columns, rhs)::Array{Float64}
-    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G" || r[2][2] == "E", rows)))
+    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G", rows))) +
+                2 * length(collect(filter(r -> r[2][2] == "E", rows)))
 
     b = zeros(row_count)
 
@@ -100,10 +105,13 @@ function createB(rows, columns, rhs)::Array{Float64}
     for (row_name, bound) in rhs
         type = rows[row_name][2]
         row_index = rows[row_name][1]
-        if type == "L" || type == "E"
+        if type == "L"
             b[row_index] = bound
         elseif type == "G"
             b[row_index] = -bound
+        elseif type == "E"
+            b[row_index]   =  bound
+            b[row_index+1] = -bound
         end
     end
 
@@ -227,7 +235,7 @@ function parseMPS(file_name)
                 else
                     @assert type == "L" || type == "G" || type == "E" "Unknown row type: $type"
                     push!(rows, row_name => (row_index, type))
-                    row_index = row_index + 1
+                    row_index = row_index + (type == "E" ? 2 : 1)
                 end
                 continue
             end
@@ -324,7 +332,8 @@ function parseMPS(file_name)
     equality_rows = falses(row_count)
     for (_, (row_idx, row_type)) in rows
         if row_type == "E"
-            equality_rows[row_idx] = true
+            equality_rows[row_idx]   = true   # first of the doubled pair
+            equality_rows[row_idx+1] = true   # negated complement
         end
     end
     return Problem(c, b, A, lo, up, names, equality_rows)
