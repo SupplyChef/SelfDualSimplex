@@ -415,6 +415,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
         end
     end
+    throw(ErrorException("Time limit reached after $iter iterations (t_b=$t_b, t_c=$t_c)"))
 end
 
 function updateBasicVariables(b_hat, Δb, leaving)
