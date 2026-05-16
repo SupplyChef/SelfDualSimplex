@@ -9,6 +9,14 @@ mutable struct Problem
     lower_bounds::Array{Float64,1}
     upper_bounds::Array{Float64,1}
     c_names::Array{String}
+    equality_rows::BitVector
+
+    function Problem(c, b, A, lower_bounds, upper_bounds, c_names)
+        new(c, b, A, lower_bounds, upper_bounds, c_names, falses(length(b)))
+    end
+    function Problem(c, b, A, lower_bounds, upper_bounds, c_names, equality_rows)
+        new(c, b, A, lower_bounds, upper_bounds, c_names, equality_rows)
+    end
 end
 
 # The following template is a guide for the use of MPS format:
@@ -52,10 +60,9 @@ end
 
 function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
     vs = filter(v -> rows[v[2]][2] != "N", vs)
-    
+
     column_count = maximum(values(columns))
-    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G", rows))) + 
-                2 * length(collect(filter(r -> r[2][2] == "E", rows)))
+    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G" || r[2][2] == "E", rows)))
 
     I = Int64[]
     J = Int64[]
@@ -65,19 +72,12 @@ function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
         type = rows[row_name][2]
         row_index = rows[row_name][1]
         column_index = columns[column_name]
-        if type == "L" 
+        if type == "L" || type == "E"
             push!(I, row_index)
             push!(J, column_index)
             push!(V, value)
-        elseif type == "G" 
+        elseif type == "G"
             push!(I, row_index)
-            push!(J, column_index)
-            push!(V, -value)
-        elseif type == "E" 
-            push!(I, row_index)
-            push!(J, column_index)
-            push!(V, value)
-            push!(I, row_index+1)
             push!(J, column_index)
             push!(V, -value)
         end
@@ -88,26 +88,22 @@ function createA(rows, columns, vs)::SparseMatrixCSC{Float64, Int64}
 end
 
 function createB(rows, columns, rhs)::Array{Float64}
-    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G", rows))) + 
-                2 * length(collect(filter(r -> r[2][2] == "E", rows)))
+    row_count = length(collect(filter(r -> r[2][2] == "L" || r[2][2] == "G" || r[2][2] == "E", rows)))
 
     b = zeros(row_count)
-    
+
     if length(rhs) > 0
         rhs = first(values(rhs))
-    else 
+    else
         rhs = []
     end
     for (row_name, bound) in rhs
         type = rows[row_name][2]
         row_index = rows[row_name][1]
-        if type == "L"
+        if type == "L" || type == "E"
             b[row_index] = bound
-        elseif type == "G" 
+        elseif type == "G"
             b[row_index] = -bound
-        elseif type == "E" 
-            b[row_index] = bound
-            b[row_index+1] = -bound
         end
     end
 
@@ -221,7 +217,7 @@ function parseMPS(file_name)
             if section == :ROWS
                 type = String(strip(line[2:3]))
                 row_name = String(strip(line[4:end]))
-                if type == "N" 
+                if type == "N"
                     if firstNrow
                         push!(rows, row_name => (0, type))
                         firstNrow = false
@@ -229,13 +225,9 @@ function parseMPS(file_name)
                         push!(excludeNRows, row_name)
                     end
                 else
+                    @assert type == "L" || type == "G" || type == "E" "Unknown row type: $type"
                     push!(rows, row_name => (row_index, type))
-                    if type == "G" || type == "L"
-                        row_index = row_index + 1
-                    else 
-                        @assert type == "E" "$type == E"
-                        row_index = row_index + 2
-                    end
+                    row_index = row_index + 1
                 end
                 continue
             end
@@ -328,5 +320,12 @@ function parseMPS(file_name)
     for (name, index) in columns
         names[index] = name
     end
-    return Problem(c, b, A, lo, up, names)
+    row_count = length(b)
+    equality_rows = falses(row_count)
+    for (_, (row_idx, row_type)) in rows
+        if row_type == "E"
+            equality_rows[row_idx] = true
+        end
+    end
+    return Problem(c, b, A, lo, up, names, equality_rows)
 end

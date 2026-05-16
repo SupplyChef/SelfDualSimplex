@@ -6,7 +6,7 @@ using SelfDualSimplex
 using Dates
 using Random
 
-function run(p::Problem, value; time_limit=-1)
+function run(p::Problem, value; time_limit=60)
     Random.seed!(0)
     start = Dates.now()
     solution = solve(p; time_limit=time_limit)
@@ -170,7 +170,7 @@ end
         println(p.c)
         println(p.b)
 
-        solution = solve(p.A, p.c, p.b)
+        solution = solve(p.A, p.c, p.b; time_limit=60)
         println(solution)
         @assert solution[1] ≈ 3.0
         @assert solution[3] ≈ 7.0
@@ -202,7 +202,7 @@ end
         b = float([5; 4; 6; -4])
         A = sparse(float([-1 3 0 1 0 0 0; 3 3 0 0 1 0 0; 0 3 2 0 0 1 0; -3 0 -5 0 0 0 1]))
         
-        solution = solve(A, c, b)
+        solution = solve(A, c, b; time_limit=60)
         println(solution)
 
         @assert solution[2] ≈ 4/3 "$(solution[2]) ≈ 4/3"
@@ -224,9 +224,9 @@ end
         b = float([4; 6; 8])
         A = sparse(float([1 0 1 0 0; 0 1 0 1 0; 1 1 0 0 1]))
 
-        solution = solve(A, c, b)
+        solution = solve(A, c, b; time_limit=60)
         println(solution)
-        
+
         @assert solution[1] ≈ 2.0
         @assert solution[2] ≈ 6.0
         @assert solution[3] ≈ 2.0
@@ -248,7 +248,7 @@ end
     # end
 end
 
-function run_lp(name::String, value; time_limit=-1)
+function run_lp(name::String, value; time_limit=60)
     print("$name ")
     p = parseMPS("../benchmarks/lptestset/$(name).mps")
     return run(p, value; time_limit=time_limit)

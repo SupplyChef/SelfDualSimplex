@@ -135,10 +135,13 @@ function solve(p; time_limit=-1)
     col_scaling = presolve!(p, presolution)
     print("$(size(p.A)) ")
     (flipped, split_pairs) = handle_negative_lowerbound_variables!(p)
+    equality_rows   = copy(p.equality_rows)   # capture before bound rows are appended
     add_upper_bounds!(p)
     add_lower_bounds!(p)
+    n_before_slacks = length(p.c)
     #add_free_variables!(p)
     add_slack_variables!(p)
+    add_equality_upper_bound_rows!(p, equality_rows, n_before_slacks)
     print("$(size(p.A)) ")
     solution = solve(p.A, p.c, p.b; time_limit=time_limit)
     solution2 = Dict{String, Float64}()
@@ -412,6 +415,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
         end
     end
+    throw(ErrorException("Time limit reached after $iter iterations (t_b=$t_b, t_c=$t_c)"))
 end
 
 function updateBasicVariables(b_hat, Δb, leaving)
