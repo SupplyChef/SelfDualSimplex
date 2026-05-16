@@ -3,7 +3,7 @@ using SelfDualSimplex
 
 function run(name::String, value)
     print("$name ")
-    p = parseMPS("C:\\Users\\rlecoeuc\\.julia\\dev\\SelfDualSimplex\\Benchmarks\\netlib\\$(name).SIF")
+    p = parseMPS(joinpath(@__DIR__, "..\\benchmarks\\netlib\\$(name).SIF"))
     return run(p, value)    
 end
 
