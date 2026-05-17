@@ -172,7 +172,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     t = 0.0
 
     n_constraints = length(b)
-    refactor_pivot_cap = 70
+    refactor_pivot_cap = max(70, min(300, n_constraints ÷ 8))
     refactor_fill_threshold = 3 * n_constraints
 
     b_scale = max(1.0, norm(b) / sqrt(n_constraints))
@@ -327,14 +327,14 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             perturbation_multipliers = perturbation_c[basis]
             btran!(pfi, multipliers)
             btran!(pfi, perturbation_multipliers)
-            for i in 1:length(c_hat)
-                c_hat[i] = c[i] - dot(A, i, multipliers)
-                @assert !isnan(c_hat[i])
-                perturbation_c_hat[i] = perturbation_c[i] - dot(A, i, perturbation_multipliers)
-                @assert !isnan(perturbation_c_hat[i])
-                if abs(perturbation_c_hat[i]) < eps
-                    perturbation_c_hat[i] = 0
-                end
+            mul!(c_hat, tA, multipliers)
+            @inbounds for i in 1:length(c_hat)
+                c_hat[i] = c[i] - c_hat[i]
+            end
+            mul!(perturbation_c_hat, tA, perturbation_multipliers)
+            @inbounds for i in 1:length(perturbation_c_hat)
+                v = perturbation_c[i] - perturbation_c_hat[i]
+                perturbation_c_hat[i] = abs(v) < eps ? 0.0 : v
             end
             continue
         end
@@ -399,14 +399,14 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             perturbation_multipliers = perturbation_c[basis]
             btran!(pfi, multipliers)
             btran!(pfi, perturbation_multipliers)
-            for i in 1:length(c_hat)
-                c_hat[i] = c[i] - dot(A, i, multipliers)
-                @assert !isnan(c_hat[i])
-                perturbation_c_hat[i] = perturbation_c[i] - dot(A, i, perturbation_multipliers)
-                @assert !isnan(perturbation_c_hat[i])
-                if abs(perturbation_c_hat[i]) < eps
-                    perturbation_c_hat[i] = 0
-                end
+            mul!(c_hat, tA, multipliers)
+            @inbounds for i in 1:length(c_hat)
+                c_hat[i] = c[i] - c_hat[i]
+            end
+            mul!(perturbation_c_hat, tA, perturbation_multipliers)
+            @inbounds for i in 1:length(perturbation_c_hat)
+                v = perturbation_c[i] - perturbation_c_hat[i]
+                perturbation_c_hat[i] = abs(v) < eps ? 0.0 : v
             end
 
             for i in basis
