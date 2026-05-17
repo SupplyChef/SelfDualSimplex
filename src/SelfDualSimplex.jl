@@ -330,7 +330,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             # Pass 2: Harris band → Devex selection.
             # Among candidates within harris_rel of min_ratio_j, pick the one
             # with the largest (-Δc[i])²/w_col[i] (steepest-edge approximation).
-            harris_thresh = min_ratio_j * (1.0 + harris_rel) + harris_abs
+            # Use abs(min_ratio_j) so the band is always above the minimum
+            # (min_ratio_j can be negative from numerical drift in c_hat(t)).
+            harris_thresh = min_ratio_j + abs(min_ratio_j) * harris_rel + harris_abs
             j = -1; j_score = 0.0
             @inbounds for i in 1:length(pc)
                 pc[i] > harris_thresh && continue
@@ -365,7 +367,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             # Pass 2: Harris band → Devex selection.
             # Among candidates within harris_rel of min_ratio_l, pick the one
             # with the largest Δb[i]²/w_row[i] (steepest-edge approximation).
-            harris_thresh = min_ratio_l * (1.0 + harris_rel) + harris_abs
+            harris_thresh = min_ratio_l + abs(min_ratio_l) * harris_rel + harris_abs
             leaving = -1; leaving_score = 0.0
             @inbounds for i in 1:length(pb)
                 pb[i] > harris_thresh && continue
