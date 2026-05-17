@@ -228,15 +228,15 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         #@assert sum(is_basic) == length(basis)
         iter = iter + 1
 
-        # Two-pass pricing.
-        # Pass 1: compute raw t_b/t_c (unweighted) for direction decision.
-        # SDS monotonicity requires the direction to be determined by the true
-        # maximum, not a Devex-weighted proxy.
-        # Pass 2: Devex selection restricted to candidates near the max so we
-        # never pivot on a variable whose parametric ratio is far below the
-        # current step size (which would stall progress).
+        # Pricing: compute t_b, t_c, and the argmax candidates simultaneously.
+        # leaving/j are set to the exact argmax (the variable achieving the
+        # maximum parametric ratio).  The SDS dual step requires the leaving row
+        # to achieve t_b — any smaller value stalls progress because the basis
+        # update step size b_hat[leaving]/Δb[leaving] ≈ 0.
         t_b = 0.0
         t_c = 0.0
+        leaving = -1
+        j = -1
         fill!(pb, 0.0)
         fill!(pc, 0.0)
         @inbounds for i in 1:length(b_hat)
@@ -244,7 +244,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             if bi < 0.0
                 v = -bi / perturbation_b_hat[i]
                 pb[i] = v
-                if v > t_b; t_b = v; end
+                if v > t_b; t_b = v; leaving = i; end
             end
         end
         @inbounds for i in 1:length(c_hat)
@@ -252,35 +252,10 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             if ci < 0.0 && !is_basic[i]
                 v = -ci / perturbation_c_hat[i]
                 pc[i] = v
-                if v > t_c; t_c = v; end
+                if v > t_c; t_c = v; j = i; end
             end
         end
         t = max(t_b, t_c)
-
-        # Pass 2: Devex selection within eligible candidates only.
-        # Threshold = 99.9999% of the step-direction max to break degenerate
-        # ties via steepest-edge without stepping on variables with near-zero
-        # parametric ratios.
-        leaving = -1
-        j = -1
-        leaving_score = 0.0
-        j_score = 0.0
-        thresh_b = t_b * (1.0 - 1e-6)
-        thresh_c = t_c * (1.0 - 1e-6)
-        @inbounds for i in 1:length(pb)
-            v = pb[i]
-            if v >= thresh_b
-                score = v * v / devex_w_row[i]
-                if score > leaving_score; leaving_score = score; leaving = i; end
-            end
-        end
-        @inbounds for i in 1:length(pc)
-            v = pc[i]
-            if v >= thresh_c
-                score = v * v / devex_w_col[i]
-                if score > j_score; j_score = score; j = i; end
-            end
-        end
         
         #@assert t <= old_t "$t $old_t"
         old_t = t
