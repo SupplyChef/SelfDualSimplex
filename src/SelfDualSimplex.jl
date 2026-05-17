@@ -339,42 +339,37 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         end
         if !forced_refactoring
             #update basis
-            Δb_leaving = Δb[leaving]
             sΔb = sparsevec(Δb)
-            droptol!(sΔb, 1e-8)
-            sΔb[leaving] = 0.0  # pivot stored separately; remove from off-diagonal vector
-            dropzeros!(sΔb)
-            η = ETAMatrix(leaving, Δb_leaving, sΔb)
+            droptol!(sΔb, 1e-10)
+            η = ETAMatrix(leaving, sΔb)
             push!(pfi.eta_matrices, η)
             total_eta_nnz += nnz(sΔb)
+            
+            updateBasicVariables(b_hat, Δb, leaving)
+            updateBasicVariables(perturbation_b_hat, Δb, leaving)
+            
+            updateDualVariables(c_hat, Δc, j, leaving, basis)
+            updateDualVariables(perturbation_c_hat, Δc, j, leaving, basis)
+            
+            # @inbounds for i in 1:length(b_hat)
+            #     if b_hat[i] < 0
+            #         b_hat[i] = 0
+            #     end
+            #     if perturbation_b_hat[i] < 0
+            #         perturbation_b_hat[i] = 0
+            #     end
+            # end
 
-            # Fused sparse b_hat + perturbation_b_hat update (reads sΔb once)
-            t_step = b_hat[leaving] / Δb_leaving
-            t_step_p = perturbation_b_hat[leaving] / Δb_leaving
-            let nzind = sΔb.nzind, nzval = sΔb.nzval
-                @inbounds for k in 1:length(nzind)
-                    i = nzind[k]
-                    d = nzval[k]
-                    b_hat[i] -= t_step * d
-                    perturbation_b_hat[i] -= t_step_p * d
-                end
-            end
-            b_hat[leaving] = t_step
-            perturbation_b_hat[leaving] = t_step_p
+            # @inbounds for i in 1:length(c_hat)
+            #     if c_hat[i] < 0
+            #         c_hat[i] = 0
+            #     end
+            #     if perturbation_c_hat[i] < 0
+            #         perturbation_c_hat[i] = 0
+            #     end
+            # end
 
-            # Fused dense c_hat + perturbation_c_hat update (reads Δc once)
-            s_step = c_hat[j] / Δc[j]
-            s_step_p = perturbation_c_hat[j] / Δc[j]
-            leaving_var = basis[leaving]
-            @inbounds for i in 1:length(Δc)
-                d = Δc[i]
-                c_hat[i] -= s_step * d
-                perturbation_c_hat[i] -= s_step_p * d
-            end
-            c_hat[leaving_var] = -s_step
-            perturbation_c_hat[leaving_var] = -s_step_p
-
-            is_basic[leaving_var] = false
+            is_basic[basis[leaving]] = false
             is_basic[j] = true
             basis[leaving] = j
 
