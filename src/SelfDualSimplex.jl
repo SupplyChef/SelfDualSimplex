@@ -211,6 +211,13 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     pb = zeros(length(b))
     pc = zeros(length(c))
 
+    # Devex reference weights.
+    # devex_w_row[i] approximates ||B⁻ᵀ eᵢ||² for basis row i.
+    # devex_w_col[j] approximates ||B⁻¹ Aⱼ||² for nonbasic column j.
+    # Both are maintained as lower bounds and reset to 1.0 on refactorization.
+    devex_w_row = ones(Float64, n_constraints)
+    devex_w_col = ones(Float64, length(c))
+
     forced_refactoring = false
     primal_count = 0
     dual_count = 0
@@ -221,22 +228,45 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         #@assert sum(is_basic) == length(basis)
         iter = iter + 1
 
+        # Single-pass pricing: compute raw t_b/t_c (for direction) and
+        # Devex-weighted leaving/j (for variable selection) simultaneously.
+        # Direction decision uses unweighted max to preserve SDS parametric
+        # monotonicity. Variable selection uses Devex scores v²/w to reduce
+        # degenerate pivots.
+        t_b = 0.0
+        t_c = 0.0
+        leaving = -1
+        j = -1
+        leaving_score = 0.0
+        j_score = 0.0
         fill!(pb, 0.0)
+        fill!(pc, 0.0)
         @inbounds for i in 1:length(b_hat)
             bi = b_hat[i]
             if bi < 0.0
-                pb[i] = -bi / perturbation_b_hat[i]
+                v = -bi / perturbation_b_hat[i]
+                pb[i] = v
+                if v > t_b; t_b = v; end
+                score = v * v / devex_w_row[i]
+                if score > leaving_score
+                    leaving_score = score
+                    leaving = i
+                end
             end
         end
-        fill!(pc, 0.0)
         @inbounds for i in 1:length(c_hat)
             ci = c_hat[i]
             if ci < 0.0 && !is_basic[i]
-                pc[i] = -ci / perturbation_c_hat[i]
+                v = -ci / perturbation_c_hat[i]
+                pc[i] = v
+                if v > t_c; t_c = v; end
+                score = v * v / devex_w_col[i]
+                if score > j_score
+                    j_score = score
+                    j = i
+                end
             end
         end
-        (t_b, leaving) = max_argmax(pb)
-        (t_c, j) = max_argmax(pc)
         t = max(t_b, t_c)
         
         #@assert t <= old_t "$t $old_t"
@@ -335,6 +365,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             @inbounds for i in 1:length(perturbation_c_hat)
                 perturbation_c_hat[i] = perturbation_c[i] - perturbation_c_hat[i]
             end
+            fill!(devex_w_row, 1.0)
+            fill!(devex_w_col, 1.0)
             continue
         end
         if !forced_refactoring
@@ -370,6 +402,27 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
                 end
                 c_hat[leaving_var]           = -s_step
                 perturbation_c_hat[leaving_var] = -s_step_p
+            end
+
+            # Devex weight update using Δb = B⁻¹Aⱼ (already computed).
+            # Row weights approximate ||B⁻ᵀeᵢ||²; col weight for leaving_var
+            # is exact: ||B_new⁻¹ A_{leaving_var}||² = ||Δb||² (proved via
+            # the eta-matrix representation of the basis update).
+            @inbounds begin
+                db_sq = 0.0
+                for i in 1:length(Δb); db_sq += Δb[i] * Δb[i]; end
+                pivot_sq = Δb[leaving] * Δb[leaving]
+                w_new = db_sq / pivot_sq
+                if w_new < 1.0; w_new = 1.0; end
+                devex_w_row[leaving] = w_new
+                inv_piv = 1.0 / Δb[leaving]
+                for i in 1:length(Δb)
+                    i == leaving && continue
+                    r = Δb[i] * inv_piv
+                    approx = r * r * w_new
+                    if approx > devex_w_row[i]; devex_w_row[i] = approx; end
+                end
+                devex_w_col[leaving_var] = db_sq < 1.0 ? 1.0 : db_sq
             end
 
             is_basic[leaving_var] = false
@@ -414,6 +467,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             for i in basis
                 #@assert abs(c_hat[i]) < 1e-12 "$(abs(c_hat[i]))"
             end
+            # Devex weights are tied to the current basis; reset after refactorization.
+            fill!(devex_w_row, 1.0)
+            fill!(devex_w_col, 1.0)
         end
         if iter % 1000 == 0 && time_ns() - start_ns > time_limit_ns
             break
