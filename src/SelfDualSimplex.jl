@@ -229,16 +229,25 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
                 pb[i] = -bi / perturbation_b_hat[i]
             end
         end
-        fill!(pc, 0.0)
+        (t_b, leaving) = max_argmax(pb)
+
+        # t_c is the perturbation ratio (controls step type, ratio tests, stopping).
+        # j is selected separately by Devex among violated candidates.
+        t_c = 0.0
+        j = -1
+        devex_best = 0.0
         @inbounds for i in 1:length(c_hat)
             ci = c_hat[i]
             if ci < 0.0 && !is_basic[i]
-                pc[i] = ci * ci / devex_w[i]
+                pci = -ci / perturbation_c_hat[i]
+                if pci > t_c; t_c = pci; end
+                score = ci * ci / devex_w[i]
+                if score > devex_best
+                    devex_best = score
+                    j = i
+                end
             end
         end
-
-        (t_b, leaving) = max_argmax(pb)
-        (t_c, j) = max_argmax(pc)
         t = max(t_b, t_c)
         
         #@assert t <= old_t "$t $old_t"
