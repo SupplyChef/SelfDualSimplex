@@ -130,7 +130,8 @@ function slu_ftran!(slu::SparseLUSolver, x::Vector{Float64})
     w  = slu.work
 
     @inbounds for i in 1:n
-        w[i] = Rs[i] * x[p[i]]
+        pi = p[i]
+        w[i] = Rs[pi] * x[pi]
     end
     sparse_lsolve_unit!(slu.L, w)
     sparse_usolve!(slu.U, slu.u_diag, w)
@@ -153,6 +154,7 @@ function slu_btran!(slu::SparseLUSolver, x::Vector{Float64})
     sparse_lsolve!(slu.Ut, slu.u_diag, w)
     sparse_usolve_unit!(slu.Lt, w)
     @inbounds for i in 1:n
-        x[p[i]] = Rs[i] * w[i]
+        pi = p[i]
+        x[pi] = Rs[pi] * w[i]
     end
 end
