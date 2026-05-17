@@ -184,12 +184,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
     eps = 1e-8
     t = 0.0
-    # Harris ratio test: allow candidates within harris_rel of the minimum
-    # ratio, then select the one with the best Devex score (largest pivot²/weight).
-    # harris_rel=1e-4 means up to 0.01% above the minimum ratio is eligible.
-    # harris_abs is an absolute floor so the band is nonzero when min_ratio≈0.
-    harris_rel = 1e-4
-    harris_abs = 1e-10
 
     n_constraints = length(b)
     refactor_pivot_cap = max(100, min(500, n_constraints ÷ 4))
@@ -235,13 +229,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
     pb = zeros(length(b))
     pc = zeros(length(c))
-
-    # Devex reference weights.
-    # devex_w_row[i] approximates ||B⁻ᵀ eᵢ||² for basis row i.
-    # devex_w_col[j] approximates ||B⁻¹ Aⱼ||² for nonbasic column j.
-    # Both are maintained as lower bounds and reset to 1.0 on refactorization.
-    devex_w_row = ones(Float64, n_constraints)
-    devex_w_col = ones(Float64, length(c))
 
     forced_refactoring = false
     primal_count = 0
@@ -312,33 +299,17 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             #     @assert Δc[i] ≈ Δc2[i] "$(Δc[i]) ≈ $(Δc2[i])"
             # end
                 
-            # Dual ratio test with Harris+Devex.
-            # Pass 1: compute ratios, find minimum.
+            # Dual ratio test: find entering column j.
             fill!(pc, Inf64)
-            min_ratio_j = Inf64
             @inbounds for i in 1:length(c_hat)
                 if !is_basic[i] && Δc[i] < -eps
-                    r = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
-                    pc[i] = r
-                    if r < min_ratio_j; min_ratio_j = r; end
+                    pc[i] = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
                 end
             end
+            (min_ratio_j, j) = min_argmin(pc)
             if isinf(min_ratio_j)
                 @debug "$iter t_b: $t_b t_c: $t_c entering:? leaving:$(basis[leaving])"
                 throw(ErrorException("Infeasible/Unbounded (minJ)"))
-            end
-            # Pass 2: Harris band → Devex selection.
-            # Among candidates within harris_rel of min_ratio_j, pick the one
-            # with the largest (-Δc[i])²/w_col[i] (steepest-edge approximation).
-            # Use abs(min_ratio_j) so the band is always above the minimum
-            # (min_ratio_j can be negative from numerical drift in c_hat(t)).
-            harris_thresh = min_ratio_j + abs(min_ratio_j) * harris_rel + harris_abs
-            j = -1; j_score = 0.0
-            @inbounds for i in 1:length(pc)
-                pc[i] > harris_thresh && continue
-                d = -Δc[i]   # d > 0
-                score = d * d / devex_w_col[i]
-                if score > j_score; j_score = score; j = i; end
             end
 
             get_column!(Δb, A, j)
@@ -349,31 +320,16 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             get_column!(Δb, A, j)
             ftran!(pfi, Δb)
             
-            # Primal ratio test with Harris+Devex.
-            # Pass 1: compute ratios, find minimum.
             fill!(pb, +Inf64)
-            min_ratio_l = Inf64
             @inbounds for i in 1:length(b_hat)
                 if Δb[i] > eps
-                    r = (b_hat[i] + t * perturbation_b_hat[i]) / Δb[i]
-                    pb[i] = r
-                    if r < min_ratio_l; min_ratio_l = r; end
+                    pb[i] = (b_hat[i] + t * perturbation_b_hat[i]) / Δb[i]
                 end
             end
-            if isinf(min_ratio_l)
+            (minL, leaving) = min_argmin(pb)
+            if isinf(minL)
                 @debug "$iter t_b: $t_b t_c: $t_c entering: $j leaving:?"
                 throw(ErrorException("Infeasible/Unbounded (minL)"))
-            end
-            # Pass 2: Harris band → Devex selection.
-            # Among candidates within harris_rel of min_ratio_l, pick the one
-            # with the largest Δb[i]²/w_row[i] (steepest-edge approximation).
-            harris_thresh = min_ratio_l + abs(min_ratio_l) * harris_rel + harris_abs
-            leaving = -1; leaving_score = 0.0
-            @inbounds for i in 1:length(pb)
-                pb[i] > harris_thresh && continue
-                d = Δb[i]    # d > 0
-                score = d * d / devex_w_row[i]
-                if score > leaving_score; leaving_score = score; leaving = i; end
             end
 
             #computeΔc!(Δc, A, el, pfi, is_basic, leaving)
@@ -406,8 +362,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             @inbounds for i in 1:length(perturbation_c_hat)
                 perturbation_c_hat[i] = perturbation_c[i] - perturbation_c_hat[i]
             end
-            fill!(devex_w_row, 1.0)
-            fill!(devex_w_col, 1.0)
             continue
         end
         if !forced_refactoring
@@ -418,10 +372,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             push!(pfi.eta_matrices, η)
             total_eta_nnz += nnz(sΔb)
 
-            # Fused: read Δb once, update b_hat/perturbation_b_hat and
-            # accumulate db_sq = ||Δb||² for the Devex update below.
             leaving_var = basis[leaving]
-            db_sq = 0.0
             @inbounds begin
                 t_step   = b_hat[leaving]              / Δb[leaving]
                 t_step_p = perturbation_b_hat[leaving] / Δb[leaving]
@@ -429,7 +380,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
                     d = Δb[i]
                     b_hat[i]              -= t_step   * d
                     perturbation_b_hat[i] -= t_step_p * d
-                    db_sq += d * d
                 end
                 b_hat[leaving]              = t_step
                 perturbation_b_hat[leaving] = t_step_p
@@ -448,23 +398,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
                 end
                 c_hat[leaving_var]              = -s_step
                 perturbation_c_hat[leaving_var] = -s_step_p
-            end
-
-            # Devex row/col weight update (second pass over Δb; uses db_sq
-            # computed in the b_hat loop above — avoids a third Δb read).
-            @inbounds begin
-                pivot_sq = Δb[leaving] * Δb[leaving]
-                w_new = db_sq / pivot_sq
-                if w_new < 1.0; w_new = 1.0; end
-                devex_w_row[leaving] = w_new
-                inv_piv = 1.0 / Δb[leaving]
-                for i in 1:length(Δb)
-                    i == leaving && continue
-                    r = Δb[i] * inv_piv
-                    approx = r * r * w_new
-                    if approx > devex_w_row[i]; devex_w_row[i] = approx; end
-                end
-                devex_w_col[leaving_var] = db_sq < 1.0 ? 1.0 : db_sq
             end
 
             is_basic[leaving_var] = false
@@ -509,9 +442,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             for i in basis
                 #@assert abs(c_hat[i]) < 1e-12 "$(abs(c_hat[i]))"
             end
-            # Devex weights are tied to the current basis; reset after refactorization.
-            fill!(devex_w_row, 1.0)
-            fill!(devex_w_col, 1.0)
         end
         if iter % 1000 == 0 && time_ns() - start_ns > time_limit_ns
             break
