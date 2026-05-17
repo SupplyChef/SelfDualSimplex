@@ -184,6 +184,12 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
     eps = 1e-8
     t = 0.0
+    # Harris ratio test: allow candidates within harris_rel of the minimum
+    # ratio, then select the one with the best Devex score (largest pivot²/weight).
+    # harris_rel=1e-4 means up to 0.01% above the minimum ratio is eligible.
+    # harris_abs is an absolute floor so the band is nonzero when min_ratio≈0.
+    harris_rel = 1e-4
+    harris_abs = 1e-10
 
     n_constraints = length(b)
     refactor_pivot_cap = max(100, min(500, n_constraints ÷ 4))
@@ -306,18 +312,31 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             #     @assert Δc[i] ≈ Δc2[i] "$(Δc[i]) ≈ $(Δc2[i])"
             # end
                 
+            # Dual ratio test with Harris+Devex.
+            # Pass 1: compute ratios, find minimum.
             fill!(pc, Inf64)
+            min_ratio_j = Inf64
             @inbounds for i in 1:length(c_hat)
-                if !is_basic[i] && Δc[i] < -eps  #c will decrease; it should not go negative for variables that are not at their upper bound (or we loose optimality)
-                    #@assert (c_hat[i] + t * perturbation_c_hat[i]) > 0 "iter: $iter c_hat: $(c_hat[i]) perturbation_c_hat: $(perturbation_c_hat[i]) t: $t $(c_hat[i] + t * perturbation_c_hat[i]) > 0"
-                    pc[i] = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
+                if !is_basic[i] && Δc[i] < -eps
+                    r = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
+                    pc[i] = r
+                    if r < min_ratio_j; min_ratio_j = r; end
                 end
             end
-            (minJ, j) = min_argmin(pc)
-            if isinf(minJ)
-                @debug "$iter t_b: $t_b t_c: $t_c entering:? leaving:$(basis[leaving]) b_hat: $(b_hat[leaving]) perturbation_b_hat: $(perturbation_b_hat[leaving]) Δb: $(Δb[leaving]) c_hat: $(c_hat) perturbation_c_hat: $(perturbation_c_hat) Δc: $(Δc) basic: $(is_basic)"
-                @debug "$(pc)"
+            if isinf(min_ratio_j)
+                @debug "$iter t_b: $t_b t_c: $t_c entering:? leaving:$(basis[leaving])"
                 throw(ErrorException("Infeasible/Unbounded (minJ)"))
+            end
+            # Pass 2: Harris band → Devex selection.
+            # Among candidates within harris_rel of min_ratio_j, pick the one
+            # with the largest (-Δc[i])²/w_col[i] (steepest-edge approximation).
+            harris_thresh = min_ratio_j * (1.0 + harris_rel) + harris_abs
+            j = -1; j_score = 0.0
+            @inbounds for i in 1:length(pc)
+                pc[i] > harris_thresh && continue
+                d = -Δc[i]   # d > 0
+                score = d * d / devex_w_col[i]
+                if score > j_score; j_score = score; j = i; end
             end
 
             get_column!(Δb, A, j)
@@ -328,18 +347,31 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             get_column!(Δb, A, j)
             ftran!(pfi, Δb)
             
+            # Primal ratio test with Harris+Devex.
+            # Pass 1: compute ratios, find minimum.
             fill!(pb, +Inf64)
+            min_ratio_l = Inf64
             @inbounds for i in 1:length(b_hat)
-                if Δb[i] > eps 
-                    # the value of the variable will decrease; down to its lower bound (plus perturbation) at maximum.
-                    pb[i] = (b_hat[i] + t * perturbation_b_hat[i]) / Δb[i]
+                if Δb[i] > eps
+                    r = (b_hat[i] + t * perturbation_b_hat[i]) / Δb[i]
+                    pb[i] = r
+                    if r < min_ratio_l; min_ratio_l = r; end
                 end
             end
-            (minL, leaving) = min_argmin(pb)
-            if isinf(minL)
-                @debug "$iter t_b: $t_b t_c: $t_c entering: $j leaving:? b_hat: $(b_hat) perturbation_b_hat: $(perturbation_b_hat) Δb: $(Δb) c_hat: $(c_hat) perturbation_c_hat: $(perturbation_c_hat) Δc: $(Δc) basic: $(is_basic)"
-                @debug "$(pb)"
+            if isinf(min_ratio_l)
+                @debug "$iter t_b: $t_b t_c: $t_c entering: $j leaving:?"
                 throw(ErrorException("Infeasible/Unbounded (minL)"))
+            end
+            # Pass 2: Harris band → Devex selection.
+            # Among candidates within harris_rel of min_ratio_l, pick the one
+            # with the largest Δb[i]²/w_row[i] (steepest-edge approximation).
+            harris_thresh = min_ratio_l * (1.0 + harris_rel) + harris_abs
+            leaving = -1; leaving_score = 0.0
+            @inbounds for i in 1:length(pb)
+                pb[i] > harris_thresh && continue
+                d = Δb[i]    # d > 0
+                score = d * d / devex_w_row[i]
+                if score > leaving_score; leaving_score = score; leaving = i; end
             end
 
             #computeΔc!(Δc, A, el, pfi, is_basic, leaving)
