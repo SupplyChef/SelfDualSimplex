@@ -172,8 +172,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     t = 0.0
 
     n_constraints = length(b)
-    refactor_pivot_cap = max(70, min(300, n_constraints ÷ 8))
-    refactor_fill_threshold = 3 * n_constraints
+    refactor_pivot_cap = max(100, min(500, n_constraints ÷ 4))
+    refactor_fill_threshold = 10 * n_constraints
 
     b_scale = max(1.0, norm(b) / sqrt(n_constraints))
     c_nz = length(c) - n_constraints
@@ -213,6 +213,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     forced_refactoring = false
     primal_count = 0
     dual_count = 0
+    total_eta_nnz = 0
     start_ns = time_ns()
     time_limit_ns = time_limit > 0 ? UInt64(time_limit) * UInt64(1_000_000_000) : typemax(UInt64)
     while true
@@ -344,6 +345,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             droptol!(sΔb, 1e-10)
             η = ETAMatrix(leaving, sΔb)
             push!(pfi.eta_matrices, η)
+            total_eta_nnz += nnz(sΔb)
             
             updateBasicVariables(b_hat, Δb, leaving)
             updateBasicVariables(perturbation_b_hat, Δb, leaving)
@@ -380,9 +382,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
         end
 
-        total_eta_nnz = sum(nnz(η.eta_other_vector) for η in pfi.eta_matrices; init=0)
         if total_eta_nnz > refactor_fill_threshold || length(pfi.eta_matrices) >= refactor_pivot_cap || forced_refactoring
             forced_refactoring = false
+            total_eta_nnz = 0
 
             #LUelimination!(pfi, A, basis)
             pfi = LUdecomposition(A, basis)
