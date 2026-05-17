@@ -194,7 +194,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     c_hat = copy(c) # values of dual variables
 
     perturbation_c = vcat(c_scale .* (1.0 .+ 5.0 .* rand(Float64, c_nz)),
-                          b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints)))
+                          zeros(Float64, n_constraints))
     perturbation_c_hat = copy(perturbation_c)
     perturbation_b = b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
     perturbation_b_hat = copy(perturbation_b)
@@ -319,7 +319,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             println("$iter Changing perturbation")
             p_scale = 1.0 / 100.0
             perturbation_c = vcat((c_scale * p_scale) .* (1.0 .+ 5.0 .* rand(Float64, c_nz)),
-                                  (b_scale * p_scale) .* (1.0 .+ 5.0 .* rand(Float64, n_constraints)))
+                                  zeros(Float64, n_constraints))
             perturbation_b = (b_scale * p_scale) .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
             perturbation_b_hat = copy(perturbation_b)
             ftran!(pfi, perturbation_b_hat)
