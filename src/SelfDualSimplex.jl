@@ -172,7 +172,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     t = 0.0
 
     n_constraints = length(b)
-    refactor_pivot_cap = max(70, n_constraints)
+    refactor_pivot_cap = 70
     refactor_fill_threshold = 3 * n_constraints
 
     b_scale = max(1.0, norm(b) / sqrt(n_constraints))
@@ -213,8 +213,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     forced_refactoring = false
     primal_count = 0
     dual_count = 0
-    start = Dates.now()
-    while(time_limit < 0 || (Dates.now() - start < Second(time_limit)))
+    start_ns = time_ns()
+    time_limit_ns = time_limit > 0 ? UInt64(time_limit) * UInt64(1_000_000_000) : typemax(UInt64)
+    while true
         #@assert sum(is_basic) == length(basis)
         iter = iter + 1
 
@@ -340,6 +341,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         if !forced_refactoring
             #update basis
             sΔb = sparsevec(Δb)
+            droptol!(sΔb, 1e-10)
             η = ETAMatrix(leaving, sΔb)
             push!(pfi.eta_matrices, η)
             
@@ -410,6 +412,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             for i in basis
                 #@assert abs(c_hat[i]) < 1e-12 "$(abs(c_hat[i]))"
             end
+        end
+        if iter % 1000 == 0 && time_ns() - start_ns > time_limit_ns
+            break
         end
     end
     throw(ErrorException("Time limit reached after $iter iterations (t_b=$t_b, t_c=$t_c)"))
