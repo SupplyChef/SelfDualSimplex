@@ -344,37 +344,39 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             η = ETAMatrix(leaving, sΔb)
             push!(pfi.eta_matrices, η)
             total_eta_nnz += nnz(sΔb)
-            
-            updateBasicVariables(b_hat, Δb, leaving)
-            updateBasicVariables(perturbation_b_hat, Δb, leaving)
-            
-            updateDualVariables(c_hat, Δc, j, leaving, basis)
-            updateDualVariables(perturbation_c_hat, Δc, j, leaving, basis)
-            
-            # @inbounds for i in 1:length(b_hat)
-            #     if b_hat[i] < 0
-            #         b_hat[i] = 0
-            #     end
-            #     if perturbation_b_hat[i] < 0
-            #         perturbation_b_hat[i] = 0
-            #     end
-            # end
 
-            # @inbounds for i in 1:length(c_hat)
-            #     if c_hat[i] < 0
-            #         c_hat[i] = 0
-            #     end
-            #     if perturbation_c_hat[i] < 0
-            #         perturbation_c_hat[i] = 0
-            #     end
-            # end
+            # Fused: read Δb once, update both b_hat and perturbation_b_hat
+            @inbounds begin
+                t_step   = b_hat[leaving]           / Δb[leaving]
+                t_step_p = perturbation_b_hat[leaving] / Δb[leaving]
+                for i in 1:length(Δb)
+                    d = Δb[i]
+                    b_hat[i]           -= t_step   * d
+                    perturbation_b_hat[i] -= t_step_p * d
+                end
+                b_hat[leaving]           = t_step
+                perturbation_b_hat[leaving] = t_step_p
+            end
 
-            is_basic[basis[leaving]] = false
+            # Fused: read Δc once, update both c_hat and perturbation_c_hat
+            leaving_var = basis[leaving]
+            @inbounds begin
+                s_step   = c_hat[j]           / Δc[j]
+                s_step_p = perturbation_c_hat[j] / Δc[j]
+                for i in 1:length(Δc)
+                    d = Δc[i]
+                    c_hat[i]           -= s_step   * d
+                    perturbation_c_hat[i] -= s_step_p * d
+                end
+                c_hat[leaving_var]           = -s_step
+                perturbation_c_hat[leaving_var] = -s_step_p
+            end
+
+            is_basic[leaving_var] = false
             is_basic[j] = true
             basis[leaving] = j
 
             for i in basis
-                #@assert abs(c_hat[i]) < 1e-3 "$i $(abs(c_hat[i]))"
                 c_hat[i] = 0
                 perturbation_c_hat[i] = 0
             end
