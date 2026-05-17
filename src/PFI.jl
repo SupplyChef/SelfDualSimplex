@@ -1,4 +1,5 @@
 include("ETA.jl")
+include("SparseLUSolve.jl")
 
 using SparseArrays
 using LinearAlgebra
@@ -10,27 +11,27 @@ mutable struct PFI
     eta_matrices::Array{ETAMatrix, 1}
     luf::Union{UmfpackLU{Float64,Int64}, Nothing}
     basis::Array{Int64, 1}
+    slu::Union{SparseLUSolver, Nothing}
 
     function PFI()
-        pfi = new(ETAMatrix[], nothing, Int64[])
+        pfi = new(ETAMatrix[], nothing, Int64[], nothing)
         return pfi
     end
     function PFI(basis::Array{Int64, 1}, eta_matrices::Array{ETAMatrix, 1})
-        pfi = new(eta_matrices, nothing, basis)
-        return pfi
-    end
-    function PFI(eta_matrices::Array{ETAMatrix, 1}, luf)
-        pfi = new(eta_matrices, luf, Int64[])
+        pfi = new(eta_matrices, nothing, basis, nothing)
         return pfi
     end
     function PFI(eta_matrices::Array{ETAMatrix, 1}, luf, basis::Array{Int64, 1})
-        pfi = new(eta_matrices, luf, basis)
+        slu = isnothing(luf) ? nothing : SparseLUSolver(luf)
+        pfi = new(eta_matrices, luf, basis, slu)
         return pfi
     end
 end
 
 function ftran!(pfi::PFI, x::Array{Float64, 1})
-    if !isnothing(pfi.luf)
+    if !isnothing(pfi.slu)
+        slu_ftran!(pfi.slu, x)
+    elseif !isnothing(pfi.luf)
         ldiv!(pfi.luf, x)
     end
     @inbounds for eta in pfi.eta_matrices
@@ -42,7 +43,9 @@ function btran!(pfi::PFI, x::Array{Float64, 1})
     @inbounds for i in length(pfi.eta_matrices):-1:1
         btran!(pfi.eta_matrices[i], x)
     end
-    if !isnothing(pfi.luf)
+    if !isnothing(pfi.slu)
+        slu_btran!(pfi.slu, x)
+    elseif !isnothing(pfi.luf)
         ldiv!(pfi.luf', x)
     end
 end
