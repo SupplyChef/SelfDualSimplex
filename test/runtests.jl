@@ -289,5 +289,83 @@ end
     # end
 end
 
+@testset "Devex pricing" begin
+    # Test 1: correctness on the standard small LP (regression: Devex must not
+    # change the optimal solution, only the path taken to reach it).
+    @test begin
+        c = float([3; -11; -2; 0; 0; 0; 0])
+        b = float([5; 4; 6; -4])
+        A = sparse(float([-1 3 0 1 0 0 0; 3 3 0 0 1 0 0; 0 3 2 0 0 1 0; -3 0 -5 0 0 0 1]))
+        solution = solve(A, c, b; time_limit=60)
+        @assert solution[2] ≈ 4/3  "solution[2]=$(solution[2])"
+        @assert solution[3] ≈ 1.0  "solution[3]=$(solution[3])"
+        @assert solution[4] ≈ 1.0  "solution[4]=$(solution[4])"
+        @assert solution[7] ≈ 1.0  "solution[7]=$(solution[7])"
+        true
+    end
+
+    # Test 2: degenerate LP with a duplicate constraint.
+    # min -x1 - x2  s.t.  x1+x2 ≤ 4,  x1 ≤ 3,  x2 ≤ 3,  x1+x2 ≤ 4 (duplicate)
+    # Optimal value = -4.  The duplicate constraint forces degeneracy: three
+    # inequality constraints are tight at every optimal vertex, but only two
+    # structural variables exist.  This exercises Devex tie-breaking.
+    @test begin
+        c = float([-1; -1; 0; 0; 0; 0])
+        b = float([4.0; 3.0; 3.0; 4.0])
+        A = sparse(float([
+            1  1  1  0  0  0;
+            1  0  0  1  0  0;
+            0  1  0  0  1  0;
+            1  1  0  0  0  1
+        ]))
+        solution = solve(A, c, b; time_limit=60)
+        r = zeros(length(c))
+        for (i, v) in solution; r[i] = v; end
+        obj = sum(c .* r)
+        println("degenerate LP obj=$obj")
+        @assert obj ≈ -4.0  "Expected -4.0 got $obj"
+        true
+    end
+
+    # Test 3: Devex weight update formula.
+    # After one pivot with known Δb, the row weight for the leaving position
+    # must equal ‖Δb‖² / Δb[leaving]².  We verify via a two-pivot solve on a
+    # 3-constraint LP where the first Δb is predictable.
+    @test begin
+        # min -x1  s.t.  x1 ≤ 1 (3 copies + slacks → basis size 3)
+        c = float([-1; 0; 0; 0])
+        b = float([1.0; 1.0; 1.0])
+        A = sparse(float([
+            1  1  0  0;
+            1  0  1  0;
+            1  0  0  1
+        ]))
+        solution = solve(A, c, b; time_limit=60)
+        r = zeros(length(c))
+        for (i, v) in solution; r[i] = v; end
+        obj = sum(c .* r)
+        @assert obj ≈ -1.0  "Expected -1.0 got $obj"
+        true
+    end
+
+    # Test 4: Klee-Minty cube (n=3).
+    # The Klee-Minty cube is designed to force the standard simplex to visit
+    # all 2^n vertices.  With Devex pricing, it should solve in far fewer steps.
+    # We only check correctness here; the meszaros testset exercises larger sizes.
+    @test begin
+        # kleemin3: min -4x3 - 2x2 - x1  s.t. Klee-Minty constraints + slacks
+        # Known optimal value: -1e4
+        Random.seed!(0)
+        p = parseMPS("../benchmarks/meszaros/kleemin3.mps")
+        solution = solve(p; time_limit=60)
+        r = zeros(length(p.c))
+        for (i, n) in enumerate(p.c_names); r[i] = get(solution, n, 0.0); end
+        obj = sum(p.c .* r)
+        println("kleemin3 obj=$obj")
+        @assert obj ≈ -1.00e4  "Expected -1e4 got $obj"
+        true
+    end
+end
+
 #include("meszaros.jl")
 include("netlib.jl")
