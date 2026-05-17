@@ -91,40 +91,54 @@ function computeΔc!(Δc::Array{Float64}, A::SparseMatrixCSC{Float64,Int64}, el:
     end
 end
 
-function computeΔc2!(Δc::Array{Float64}, tA::SparseMatrixCSC{Float64,Int64}, el::Array{Float64}, pfi::PFI, is_basic::Array{Bool}, l::Int64, eps::Float64)
-    c = size(tA)[1]
-    b = size(tA)[2]
-    
+# Computes Δc = B⁻ᵀ eₗ scattered through A.
+# Δc_nz/Δc_flag are scratch: on entry they describe the previous call's
+# nonzero set; on exit they describe the current call's nonzero set.
+# Using them avoids fill!(Δc, 0) over all n columns every iteration.
+function computeΔc2!(Δc::Array{Float64}, Δc_nz::Vector{Int}, Δc_flag::Vector{Bool},
+                     tA::SparseMatrixCSC{Float64,Int64}, el::Array{Float64},
+                     pfi::PFI, l::Int64, eps::Float64)
+    n_cols = size(tA)[1]
+    m      = size(tA)[2]
+
     fill!(el, 0.0)
     el[l] = 1.0
     btran!(pfi, el)
-    
-    fill!(Δc, 0.0)
-    
-    for i in 1:length(el)
-        if abs(el[i]) > eps
-            # (Is, Vs) = get_nz(tA, i)
-            # for j in 1:length(Is)
-            #     Δc[Is[j]] += el[i] * Vs[j]
-            # end
-            @inbounds for j in tA.colptr[i]:(tA.colptr[i+1]-1)
-                Δc[tA.rowval[j]] += el[i] * tA.nzval[j]
+
+    # Sparse reset: zero only entries written last call.
+    @inbounds for k in Δc_nz
+        Δc[k]      = 0.0
+        Δc_flag[k] = false
+    end
+    empty!(Δc_nz)
+
+    # Scatter B⁻ᵀeₗ through A (via tA = Aᵀ stored column-major).
+    @inbounds for i in 1:m
+        eli = el[i]
+        abs(eli) > eps || continue
+        for ptr in tA.colptr[i]:(tA.colptr[i+1]-1)
+            j = tA.rowval[ptr]
+            Δc[j] += eli * tA.nzval[ptr]
+            if !Δc_flag[j]
+                Δc_flag[j] = true
+                push!(Δc_nz, j)
             end
         end
     end
 
-    for i in (c - b + 1):length(Δc)
-        if i > c - b
-            Δc[i] = el[i - (c - b)]
+    # Slack columns: Δc[n_cols-m+i] = el[i].  The scatter above already
+    # produces this via the identity block in tA, but we overwrite for
+    # exactness (avoids accumulating eps-filtered approximation error).
+    slack_base = n_cols - m
+    @inbounds for i in 1:m
+        v = el[i]
+        v == 0.0 && continue
+        j = slack_base + i
+        if !Δc_flag[j]
+            Δc_flag[j] = true
+            push!(Δc_nz, j)
         end
-        #else 
-        #if is_basic[i]
-        #     Δc[i] = 0
-        # end
-        # if abs(Δc[i]) < 1e-12
-        #     Δc[i] = 0
-        # end
-        #end
+        Δc[j] = v
     end
 end
 
@@ -207,6 +221,11 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     el = zeros(length(b))
     Δb = zeros(length(b))
     Δc = zeros(length(c))
+    # Sparse-Δc tracking: Δc_nz holds the indices written last iteration;
+    # Δc_flag[j] is true iff Δc[j] is currently nonzero.
+    Δc_nz   = Int[]
+    sizehint!(Δc_nz, length(c))
+    Δc_flag = zeros(Bool, length(c))
 
     pb = zeros(length(b))
     pc = zeros(length(c))
@@ -282,7 +301,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             #dual simplex step   
             #computeΔc!(Δc, A, el, pfi, is_basic, leaving)
             #Δc2 = copy(Δc)
-            computeΔc2!(Δc, tA, el, pfi, is_basic, leaving, eps)
+            computeΔc2!(Δc, Δc_nz, Δc_flag, tA, el, pfi, leaving, eps)
             # for i in 1:length(Δc)
             #     @assert Δc[i] ≈ Δc2[i] "$(Δc[i]) ≈ $(Δc2[i])"
             # end
@@ -324,7 +343,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
 
             #computeΔc!(Δc, A, el, pfi, is_basic, leaving)
-            computeΔc2!(Δc, tA, el, pfi, is_basic, leaving, eps)
+            computeΔc2!(Δc, Δc_nz, Δc_flag, tA, el, pfi, leaving, eps)
         end
         catch
             #forced_refactoring = true
@@ -365,40 +384,41 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             push!(pfi.eta_matrices, η)
             total_eta_nnz += nnz(sΔb)
 
-            # Fused: read Δb once, update both b_hat and perturbation_b_hat
+            # Fused: read Δb once, update b_hat/perturbation_b_hat and
+            # accumulate db_sq = ||Δb||² for the Devex update below.
+            leaving_var = basis[leaving]
+            db_sq = 0.0
             @inbounds begin
-                t_step   = b_hat[leaving]           / Δb[leaving]
+                t_step   = b_hat[leaving]              / Δb[leaving]
                 t_step_p = perturbation_b_hat[leaving] / Δb[leaving]
                 for i in 1:length(Δb)
                     d = Δb[i]
-                    b_hat[i]           -= t_step   * d
+                    b_hat[i]              -= t_step   * d
                     perturbation_b_hat[i] -= t_step_p * d
+                    db_sq += d * d
                 end
-                b_hat[leaving]           = t_step
+                b_hat[leaving]              = t_step
                 perturbation_b_hat[leaving] = t_step_p
             end
 
-            # Fused: read Δc once, update both c_hat and perturbation_c_hat
-            leaving_var = basis[leaving]
+            # Sparse c_hat update: only iterate over Δc_nz (the nonzero
+            # indices of Δc filled by computeΔc2!), skipping the ~(n-nnz_Δc)
+            # zero entries that the old dense loop wasted work on.
             @inbounds begin
-                s_step   = c_hat[j]           / Δc[j]
+                s_step   = c_hat[j]              / Δc[j]
                 s_step_p = perturbation_c_hat[j] / Δc[j]
-                for i in 1:length(Δc)
-                    d = Δc[i]
-                    c_hat[i]           -= s_step   * d
-                    perturbation_c_hat[i] -= s_step_p * d
+                for k in Δc_nz
+                    d = Δc[k]
+                    c_hat[k]              -= s_step   * d
+                    perturbation_c_hat[k] -= s_step_p * d
                 end
-                c_hat[leaving_var]           = -s_step
+                c_hat[leaving_var]              = -s_step
                 perturbation_c_hat[leaving_var] = -s_step_p
             end
 
-            # Devex weight update using Δb = B⁻¹Aⱼ (already computed).
-            # Row weights approximate ||B⁻ᵀeᵢ||²; col weight for leaving_var
-            # is exact: ||B_new⁻¹ A_{leaving_var}||² = ||Δb||² (proved via
-            # the eta-matrix representation of the basis update).
+            # Devex row/col weight update (second pass over Δb; uses db_sq
+            # computed in the b_hat loop above — avoids a third Δb read).
             @inbounds begin
-                db_sq = 0.0
-                for i in 1:length(Δb); db_sq += Δb[i] * Δb[i]; end
                 pivot_sq = Δb[leaving] * Δb[leaving]
                 w_new = db_sq / pivot_sq
                 if w_new < 1.0; w_new = 1.0; end
