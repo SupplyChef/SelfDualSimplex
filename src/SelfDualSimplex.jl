@@ -193,9 +193,10 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     b_hat = copy(b) # values of basic variables
     c_hat = copy(c) # values of dual variables
 
-    perturbation_c = vcat(c_scale .* (repeat([1.0], c_nz) .+ 5 .* rand(Float64, c_nz)), repeat([0.0], n_constraints))
+    perturbation_c = vcat(c_scale .* (1.0 .+ 5.0 .* rand(Float64, c_nz)),
+                          b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints)))
     perturbation_c_hat = copy(perturbation_c)
-    perturbation_b = b_scale .* (repeat([1.0], n_constraints) .+ 5 .* rand(Float64, n_constraints))
+    perturbation_b = b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
     perturbation_b_hat = copy(perturbation_b)
     
     old_t = Inf64
@@ -214,6 +215,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     primal_count = 0
     dual_count = 0
     total_eta_nnz = 0
+    devex_w = ones(Float64, length(c))   # non-basic column pricing weights
+    devex_v = ones(Float64, length(b))   # basic row pricing weights
     start_ns = time_ns()
     time_limit_ns = time_limit > 0 ? UInt64(time_limit) * UInt64(1_000_000_000) : typemax(UInt64)
     while true
@@ -222,17 +225,16 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
         fill!(pb, 0.0)
         @inbounds for i in 1:length(b_hat)
-            if b_hat[i] < 0.0
-                violation = -b_hat[i]
-                pb[i] = violation / perturbation_b_hat[i]
+            bi = b_hat[i]
+            if bi < 0.0
+                pb[i] = bi * bi / devex_v[i]
             end
         end
         fill!(pc, 0.0)
         @inbounds for i in 1:length(c_hat)
-            c_hat_i = c_hat[i]
-            if c_hat_i < 0.0 && !is_basic[i] 
-                violation = -c_hat_i 
-                pc[i] = violation / perturbation_c_hat[i]
+            ci = c_hat[i]
+            if ci < 0.0 && !is_basic[i]
+                pc[i] = ci * ci / devex_w[i]
             end
         end
 
@@ -318,12 +320,14 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
 
         if Δb[leaving] == 0 || Δc[j] == 0
             println("$iter Changing perturbation")
-            perturbation_c = vcat((c_scale / 100.0) .* (repeat([1.0], c_nz) .+ 5 .* rand(Float64, c_nz)), repeat([0.0], n_constraints))
-            perturbation_c_hat = copy(perturbation_c)
-            perturbation_b = b_scale .* (repeat([1.0], n_constraints) .+ 5 .* rand(Float64, n_constraints))
+            fill!(devex_w, 1.0)
+            fill!(devex_v, 1.0)
+            p_scale = 1.0 / 100.0
+            perturbation_c = vcat((c_scale * p_scale) .* (1.0 .+ 5.0 .* rand(Float64, c_nz)),
+                                  (b_scale * p_scale) .* (1.0 .+ 5.0 .* rand(Float64, n_constraints)))
+            perturbation_b = (b_scale * p_scale) .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
             perturbation_b_hat = copy(perturbation_b)
             ftran!(pfi, perturbation_b_hat)
-        
             multipliers = c[basis]
             perturbation_multipliers = perturbation_c[basis]
             btran!(pfi, multipliers)
@@ -334,8 +338,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             end
             mul!(perturbation_c_hat, tA, perturbation_multipliers)
             @inbounds for i in 1:length(perturbation_c_hat)
-                v = perturbation_c[i] - perturbation_c_hat[i]
-                perturbation_c_hat[i] = abs(v) < eps ? 0.0 : v
+                perturbation_c_hat[i] = perturbation_c[i] - perturbation_c_hat[i]
             end
             continue
         end
@@ -371,7 +374,28 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             #     end
             # end
 
-            is_basic[basis[leaving]] = false
+            # Devex weight update (before basis changes so basis[leaving] still valid)
+            old_basic = basis[leaving]
+            pivot_sq = Δb[leaving] * Δb[leaving]
+            if pivot_sq > 1e-20
+                scale_col = devex_w[j] / pivot_sq
+                @inbounds for k in 1:length(devex_w)
+                    if !is_basic[k]
+                        cand = Δc[k] * Δc[k] * scale_col
+                        if cand > devex_w[k]; devex_w[k] = cand; end
+                    end
+                end
+                devex_w[old_basic] = max(1.0, Δc[old_basic] * Δc[old_basic] * scale_col)
+                devex_w[j] = 1.0
+                scale_row = devex_v[leaving] / pivot_sq
+                @inbounds for i in 1:length(devex_v)
+                    cand = Δb[i] * Δb[i] * scale_row
+                    if cand > devex_v[i]; devex_v[i] = cand; end
+                end
+                devex_v[leaving] = max(1.0, scale_row)
+            end
+
+            is_basic[old_basic] = false
             is_basic[j] = true
             basis[leaving] = j
 
@@ -385,6 +409,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         if total_eta_nnz > refactor_fill_threshold || length(pfi.eta_matrices) >= refactor_pivot_cap || forced_refactoring
             forced_refactoring = false
             total_eta_nnz = 0
+            fill!(devex_w, 1.0)
+            fill!(devex_v, 1.0)
 
             #LUelimination!(pfi, A, basis)
             pfi = LUdecomposition(A, basis)
