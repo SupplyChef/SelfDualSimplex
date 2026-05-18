@@ -207,7 +207,17 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     b_hat = copy(b) # values of basic variables
     c_hat = copy(c) # values of dual variables
 
-    perturbation_c = vcat(c_scale .* (1.0 .+ 5.0 .* rand(Float64, c_nz)),
+    # Initial c-perturbation scaled by column norms of A.  At initialization B=I,
+    # so ||B⁻¹Aⱼ|| = ||Aⱼ||, and perturbation_c[j] ∝ ||Aⱼ|| gives exact steepest-edge
+    # pricing for primal steps: argmax(-ĉ[j]/perturbation_c[j]) = argmax(|ĉ[j]|/||Aⱼ||).
+    col_norms = zeros(Float64, c_nz)
+    @inbounds for j in 1:c_nz
+        for k in A.colptr[j]:(A.colptr[j+1]-1)
+            col_norms[j] += A.nzval[k]^2
+        end
+        col_norms[j] = sqrt(col_norms[j])
+    end
+    perturbation_c = vcat(c_scale .* max.(1.0, col_norms) .* (1.0 .+ 0.1 .* rand(Float64, c_nz)),
                           zeros(Float64, n_constraints))
     perturbation_c_hat = copy(perturbation_c)
     perturbation_b = b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
@@ -227,8 +237,11 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     sizehint!(Δc_nz, length(c))
     Δc_flag = zeros(Bool, length(c))
 
-    pb = zeros(length(b))
-    pc = zeros(length(c))
+    # Devex weight estimates.  devex_w_row[i] ≈ ||B⁻ᵀeᵢ||²,  devex_w_col[j] ≈ ||B⁻¹Aⱼ||².
+    # Updated via recurrence after each pivot; used at refactorization to set the next
+    # phase's perturbation ∝ sqrt(weight), biasing pricing toward steepest-edge pivots.
+    devex_w_row = ones(Float64, n_constraints)
+    devex_w_col = vcat(max.(1.0, col_norms) .^ 2, ones(Float64, n_constraints))
 
     forced_refactoring = false
     primal_count = 0
@@ -245,17 +258,11 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         # maximum parametric ratio).  The SDS dual step requires the leaving row
         # to achieve t_b — any smaller value stalls progress because the basis
         # update step size b_hat[leaving]/Δb[leaving] ≈ 0.
-        t_b = 0.0
-        t_c = 0.0
-        leaving = -1
-        j = -1
-        fill!(pb, 0.0)
-        fill!(pc, 0.0)
+        t_b = 0.0; t_c = 0.0; leaving = -1; j = -1
         @inbounds for i in 1:length(b_hat)
             bi = b_hat[i]
             if bi < 0.0
                 v = -bi / perturbation_b_hat[i]
-                pb[i] = v
                 if v > t_b; t_b = v; leaving = i; end
             end
         end
@@ -263,7 +270,6 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             ci = c_hat[i]
             if ci < 0.0 && !is_basic[i]
                 v = -ci / perturbation_c_hat[i]
-                pc[i] = v
                 if v > t_c; t_c = v; j = i; end
             end
         end
@@ -299,15 +305,15 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             #     @assert Δc[i] ≈ Δc2[i] "$(Δc[i]) ≈ $(Δc2[i])"
             # end
                 
-            # Dual ratio test: find entering column j.
-            fill!(pc, Inf64)
-            @inbounds for i in 1:length(c_hat)
+            # Dual ratio test: scan only Δc_nz (entries written by computeΔc2!).
+            j = -1; min_ratio_j = Inf64
+            @inbounds for i in Δc_nz
                 if !is_basic[i] && Δc[i] < -eps
-                    pc[i] = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
+                    r = (c_hat[i] + t * perturbation_c_hat[i]) / -Δc[i]
+                    if r < min_ratio_j; min_ratio_j = r; j = i; end
                 end
             end
-            (min_ratio_j, j) = min_argmin(pc)
-            if isinf(min_ratio_j)
+            if j == -1
                 @debug "$iter t_b: $t_b t_c: $t_c entering:? leaving:$(basis[leaving])"
                 throw(ErrorException("Infeasible/Unbounded (minJ)"))
             end
@@ -320,14 +326,14 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             get_column!(Δb, A, j)
             ftran!(pfi, Δb)
             
-            fill!(pb, +Inf64)
+            leaving = -1; minL = Inf64
             @inbounds for i in 1:length(b_hat)
                 if Δb[i] > eps
-                    pb[i] = (b_hat[i] + t * perturbation_b_hat[i]) / Δb[i]
+                    r = (b_hat[i] + t * perturbation_b_hat[i]) / Δb[i]
+                    if r < minL; minL = r; leaving = i; end
                 end
             end
-            (minL, leaving) = min_argmin(pb)
-            if isinf(minL)
+            if leaving == -1
                 @debug "$iter t_b: $t_b t_c: $t_c entering: $j leaving:?"
                 throw(ErrorException("Infeasible/Unbounded (minL)"))
             end
@@ -362,6 +368,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             @inbounds for i in 1:length(perturbation_c_hat)
                 perturbation_c_hat[i] = perturbation_c[i] - perturbation_c_hat[i]
             end
+            fill!(devex_w_row, 1.0)
+            fill!(devex_w_col, 1.0)
             continue
         end
         if !forced_refactoring
@@ -373,6 +381,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             total_eta_nnz += nnz(sΔb)
 
             leaving_var = basis[leaving]
+            db_sq = 0.0
             @inbounds begin
                 t_step   = b_hat[leaving]              / Δb[leaving]
                 t_step_p = perturbation_b_hat[leaving] / Δb[leaving]
@@ -380,9 +389,27 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
                     d = Δb[i]
                     b_hat[i]              -= t_step   * d
                     perturbation_b_hat[i] -= t_step_p * d
+                    db_sq += d * d
                 end
                 b_hat[leaving]              = t_step
                 perturbation_b_hat[leaving] = t_step_p
+            end
+
+            # Devex recurrence: update row weights (devex_w_row[i] ≈ ||B⁻ᵀeᵢ||²)
+            # and set column weight for the newly-nonbasic variable.
+            @inbounds begin
+                piv     = Δb[leaving]
+                piv_sq  = piv * piv
+                w_new   = max(1.0, db_sq / piv_sq)
+                devex_w_row[leaving] = w_new
+                inv_piv = 1.0 / piv
+                for i in 1:length(Δb)
+                    i == leaving && continue
+                    r = Δb[i] * inv_piv
+                    approx = r * r * w_new
+                    if approx > devex_w_row[i]; devex_w_row[i] = approx; end
+                end
+                devex_w_col[leaving_var] = w_new
             end
 
             # Sparse c_hat update: only iterate over Δc_nz (the nonzero
@@ -414,17 +441,29 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             forced_refactoring = false
             total_eta_nnz = 0
 
+            # Update perturbation using Devex weights accumulated since the last refactor.
+            # perturbation_b[i] ∝ sqrt(devex_w_row[i]) ≈ ||B⁻ᵀeᵢ|| makes pricing equivalent
+            # to steepest-edge: argmax(-b̂[i]/perturbation_b̂[i]) = argmax(|b̂[i]|/||B⁻ᵀeᵢ||).
+            @inbounds for i in 1:n_constraints
+                perturbation_b[i] = b_scale * sqrt(devex_w_row[i]) * (1.0 + 0.1 * rand())
+            end
+            @inbounds for j in 1:c_nz
+                perturbation_c[j] = c_scale * sqrt(devex_w_col[j]) * (1.0 + 0.1 * rand())
+            end
+            fill!(devex_w_row, 1.0)
+            fill!(devex_w_col, 1.0)
+
             #LUelimination!(pfi, A, basis)
             pfi = LUdecomposition(A, basis)
             basis = pfi.basis
-            
+
             b_hat = copy(b)
             ftran!(pfi, b_hat)
             @assert count(x -> isnan(x), b_hat) == 0
 
             perturbation_b_hat = copy(perturbation_b)
             ftran!(pfi, perturbation_b_hat)
-            
+
             multipliers = c[basis]
             perturbation_multipliers = perturbation_c[basis]
             btran!(pfi, multipliers)
