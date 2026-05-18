@@ -208,8 +208,11 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     c_hat = copy(c) # values of dual variables
 
     # Initial c-perturbation scaled by column norms of A.  At initialization B=I,
-    # so ||B⁻¹Aⱼ|| = ||Aⱼ||, and perturbation_c[j] ∝ ||Aⱼ|| gives exact steepest-edge
+    # so ||B⁻¹Aⱼ|| = ||Aⱼ||, and perturbation_c[j] ∝ ||Aⱼ|| gives steepest-edge
     # pricing for primal steps: argmax(-ĉ[j]/perturbation_c[j]) = argmax(|ĉ[j]|/||Aⱼ||).
+    # Column norms are clamped to [1, 6] so perturbation magnitude stays in the same
+    # range as the original (1 + 5·rand()) random perturbation — preventing premature
+    # termination when t_b/t_c appear small due to inflated denominators.
     col_norms = zeros(Float64, c_nz)
     @inbounds for j in 1:c_nz
         for k in A.colptr[j]:(A.colptr[j+1]-1)
@@ -217,7 +220,8 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         end
         col_norms[j] = sqrt(col_norms[j])
     end
-    perturbation_c = vcat(c_scale .* max.(1.0, col_norms) .* (1.0 .+ 0.1 .* rand(Float64, c_nz)),
+    col_norms_clamped = clamp.(col_norms, 1.0, 6.0)
+    perturbation_c = vcat(c_scale .* col_norms_clamped .* (1.0 .+ 0.1 .* rand(Float64, c_nz)),
                           zeros(Float64, n_constraints))
     perturbation_c_hat = copy(perturbation_c)
     perturbation_b = b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
@@ -241,7 +245,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     # Updated via recurrence after each pivot; used at refactorization to set the next
     # phase's perturbation ∝ sqrt(weight), biasing pricing toward steepest-edge pivots.
     devex_w_row = ones(Float64, n_constraints)
-    devex_w_col = vcat(max.(1.0, col_norms) .^ 2, ones(Float64, n_constraints))
+    devex_w_col = vcat(col_norms_clamped .^ 2, ones(Float64, n_constraints))
 
     forced_refactoring = false
     primal_count = 0
@@ -445,10 +449,10 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             # perturbation_b[i] ∝ sqrt(devex_w_row[i]) ≈ ||B⁻ᵀeᵢ|| makes pricing equivalent
             # to steepest-edge: argmax(-b̂[i]/perturbation_b̂[i]) = argmax(|b̂[i]|/||B⁻ᵀeᵢ||).
             @inbounds for i in 1:n_constraints
-                perturbation_b[i] = b_scale * sqrt(devex_w_row[i]) * (1.0 + 0.1 * rand())
+                perturbation_b[i] = b_scale * clamp(sqrt(devex_w_row[i]), 1.0, 6.0) * (1.0 + 0.1 * rand())
             end
             @inbounds for j in 1:c_nz
-                perturbation_c[j] = c_scale * sqrt(devex_w_col[j]) * (1.0 + 0.1 * rand())
+                perturbation_c[j] = c_scale * clamp(sqrt(devex_w_col[j]), 1.0, 6.0) * (1.0 + 0.1 * rand())
             end
             fill!(devex_w_row, 1.0)
             fill!(devex_w_col, 1.0)
