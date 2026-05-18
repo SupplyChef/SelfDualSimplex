@@ -142,6 +142,28 @@ function computeΔc2!(Δc::Array{Float64}, Δc_nz::Vector{Int}, Δc_flag::Vector
     end
 end
 
+# Map `lengths` (steepest-edge length estimates, one per variable) to perturbation
+# values in [scale, 6·scale].  Min-max normalization guarantees the full range is
+# always used regardless of the distribution of weights, preventing the clustering
+# that a clamp produces when many weights are above/below the clamp threshold.
+# If all lengths are equal (no information) the normalized value is drawn uniformly
+# so the result is identical to the original random perturbation.
+# A 1% random noise on top breaks ties within similar weights.
+function se_perturbation!(out::AbstractVector{Float64}, scale::Float64,
+                          lengths::AbstractVector{Float64}, n::Int)
+    w_lo = Inf64; w_hi = -Inf64
+    @inbounds for i in 1:n
+        v = lengths[i]
+        if v < w_lo; w_lo = v; end
+        if v > w_hi; w_hi = v; end
+    end
+    spread = w_hi - w_lo
+    @inbounds for i in 1:n
+        norm_v = spread > 0.0 ? (lengths[i] - w_lo) / spread : rand()
+        out[i] = scale * (1.0 + 5.0 * norm_v) * (1.0 + 0.01 * rand())
+    end
+end
+
 function solve(p; time_limit=-1)
     p = deepcopy(p)
     print("$(size(p.A)) ")
@@ -207,12 +229,12 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     b_hat = copy(b) # values of basic variables
     c_hat = copy(c) # values of dual variables
 
-    # Initial c-perturbation scaled by column norms of A.  At initialization B=I,
-    # so ||B⁻¹Aⱼ|| = ||Aⱼ||, and perturbation_c[j] ∝ ||Aⱼ|| gives steepest-edge
-    # pricing for primal steps: argmax(-ĉ[j]/perturbation_c[j]) = argmax(|ĉ[j]|/||Aⱼ||).
-    # Column norms are clamped to [1, 6] so perturbation magnitude stays in the same
-    # range as the original (1 + 5·rand()) random perturbation — preventing premature
-    # termination when t_b/t_c appear small due to inflated denominators.
+    # Initial c-perturbation: steepest-edge ordering from column norms.  At B=I,
+    # ||B⁻¹Aⱼ|| = ||Aⱼ||, so perturbation_c[j] ∝ ||Aⱼ|| gives
+    # argmax(-ĉ[j]/perturbation_c[j]) = argmax(|ĉ[j]|/||Aⱼ||) = steepest-edge.
+    # Min-max normalization maps the full distribution of col_norms onto [1, 6]·c_scale
+    # so no two columns share the same base perturbation (no near-ties → no near-zero
+    # t-decrease steps → no ill-conditioned ETA matrices).
     col_norms = zeros(Float64, c_nz)
     @inbounds for j in 1:c_nz
         for k in A.colptr[j]:(A.colptr[j+1]-1)
@@ -220,9 +242,9 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
         end
         col_norms[j] = sqrt(col_norms[j])
     end
-    col_norms_clamped = clamp.(col_norms, 1.0, 6.0)
-    perturbation_c = vcat(c_scale .* col_norms_clamped .* (1.0 .+ 0.1 .* rand(Float64, c_nz)),
-                          zeros(Float64, n_constraints))
+    perturbation_c_structural = Vector{Float64}(undef, c_nz)
+    se_perturbation!(perturbation_c_structural, c_scale, col_norms, c_nz)
+    perturbation_c = vcat(perturbation_c_structural, zeros(Float64, n_constraints))
     perturbation_c_hat = copy(perturbation_c)
     perturbation_b = b_scale .* (1.0 .+ 5.0 .* rand(Float64, n_constraints))
     perturbation_b_hat = copy(perturbation_b)
@@ -245,7 +267,7 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
     # Updated via recurrence after each pivot; used at refactorization to set the next
     # phase's perturbation ∝ sqrt(weight), biasing pricing toward steepest-edge pivots.
     devex_w_row = ones(Float64, n_constraints)
-    devex_w_col = vcat(col_norms_clamped .^ 2, ones(Float64, n_constraints))
+    devex_w_col = vcat(col_norms .^ 2, ones(Float64, n_constraints))
 
     forced_refactoring = false
     primal_count = 0
@@ -445,15 +467,14 @@ function solve(A::SparseMatrixCSC{Float64, Int64},c::Array{Float64,1},b::Array{F
             forced_refactoring = false
             total_eta_nnz = 0
 
-            # Update perturbation using Devex weights accumulated since the last refactor.
-            # perturbation_b[i] ∝ sqrt(devex_w_row[i]) ≈ ||B⁻ᵀeᵢ|| makes pricing equivalent
-            # to steepest-edge: argmax(-b̂[i]/perturbation_b̂[i]) = argmax(|b̂[i]|/||B⁻ᵀeᵢ||).
-            @inbounds for i in 1:n_constraints
-                perturbation_b[i] = b_scale * clamp(sqrt(devex_w_row[i]), 1.0, 6.0) * (1.0 + 0.1 * rand())
-            end
-            @inbounds for j in 1:c_nz
-                perturbation_c[j] = c_scale * clamp(sqrt(devex_w_col[j]), 1.0, 6.0) * (1.0 + 0.1 * rand())
-            end
+            # Update perturbation from Devex weights via min-max normalization.
+            # sqrt(devex_w) approximates ||B⁻ᵀeᵢ|| / ||B⁻¹Aⱼ||; normalizing to [1,6]
+            # preserves the steepest-edge ordering while guaranteeing the full spread —
+            # no two rows/columns share the same base, so no near-zero t-decrease steps.
+            se_perturbation!(perturbation_b, b_scale,
+                             sqrt.(devex_w_row),        n_constraints)
+            se_perturbation!(view(perturbation_c, 1:c_nz), c_scale,
+                             sqrt.(view(devex_w_col, 1:c_nz)), c_nz)
             fill!(devex_w_row, 1.0)
             fill!(devex_w_col, 1.0)
 
